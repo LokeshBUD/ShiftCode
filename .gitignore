@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+src/shiftcode/vendor/lib2to3/*.pickle
+.pytest_cache/
+.env

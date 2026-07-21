@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shiftcode"
+version = "0.1.0"
+description = "Autonomous Legacy Code-Based Migration and Refactoring Engine"
+requires-python = ">=3.9"
+dependencies = [
+    "openai>=1.40",
+    "pydantic>=2",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+]
+
+[project.scripts]
+shiftcode = "shiftcode.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"shiftcode.vendor.lib2to3" = ["*.txt", "**/*.txt"]
+"shiftcode.prompts" = ["*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
