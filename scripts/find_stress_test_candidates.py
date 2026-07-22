@@ -39,6 +39,18 @@ SEED_CANDIDATES = [
     "kennethreitz/tablib",
     "benoitc/gunicorn",
     "aaronsw/html2text",
+    "kennethreitz/maya",
+    "kennethreitz/clint",
+    "jek/blinker",
+    "pallets/itsdangerous",
+    "python-jsonschema/jsonschema",
+    "pytoolz/toolz",
+    "codeinthehole/purl",
+    "dbader/schedule",
+    "kislyuk/argcomplete",
+    "litl/rauth",
+    "jmcarp/robobrowser",
+    "PyCQA/isort",
 ]
 
 PY3_COMMIT_MESSAGE_RE = re.compile(
@@ -85,11 +97,46 @@ def _find_py3_commit(repo_dir: Path) -> str | None:
 
 
 _STDLIB_HINTS = {
+    # Python 2.7 standard library (plus a few near-universal build-tooling
+    # names) - deliberately broad. Under-counting stdlib modules as "external
+    # deps" was rejecting genuinely suitable candidates (jsonschema,
+    # itsdangerous, toolz, blinker, purl, schedule all got wrongly flagged
+    # for "many external deps" that were actually distutils/pickle/hashlib/
+    # datetime/etc. - all stdlib). False positives here (an actual third-party
+    # package that happens to share a name) just mean an unsuitable candidate
+    # looks suitable - caught for real once the actual stress-test run tries
+    # to import it, not a correctness risk to ShiftCode itself.
     "os", "sys", "re", "io", "json", "time", "math", "random", "itertools",
     "functools", "collections", "contextlib", "types", "copy", "abc",
-    "unittest", "argparse", "subprocess", "tempfile", "shutil", "glob",
+    "unittest", "unittest2", "argparse", "subprocess", "tempfile", "shutil", "glob",
     "string", "textwrap", "warnings", "traceback", "inspect", "ast",
-    "getopt", "unicodedata", "htmlentitydefs", "urllib", "urllib2",
+    "getopt", "unicodedata", "htmlentitydefs", "urllib", "urllib2", "urlparse",
+    "distutils", "pickle", "cPickle", "hashlib", "hmac", "base64", "zlib",
+    "weakref", "atexit", "errno", "decimal", "ConfigParser", "configparser",
+    "ctypes", "platform", "resource", "signal", "socket", "select", "grp",
+    "pwd", "linecache", "StringIO", "cStringIO", "Queue", "queue", "UserDict",
+    "logging", "datetime", "csv", "codecs", "struct", "operator", "threading",
+    "thread", "_thread", "multiprocessing", "SocketServer", "socketserver",
+    "BaseHTTPServer", "http", "httplib", "cookielib", "Cookie", "xml",
+    "xmlrpclib", "SimpleXMLRPCServer", "email", "smtplib", "ftplib",
+    "telnetlib", "uuid", "binascii", "bisect", "heapq", "array", "calendar",
+    "locale", "gettext", "doctest", "pdb", "profile", "cProfile", "timeit",
+    "dis", "gc", "copy_reg", "copyreg", "__builtin__", "builtins",
+    "exceptions", "imp", "importlib", "pkgutil", "runpy", "site",
+    "sysconfig", "mmap", "fcntl", "termios", "tty", "pty", "pipes",
+    "posixfile", "nis", "syslog", "curses", "readline", "rlcompleter",
+    "shelve", "marshal", "dbm", "anydbm", "whichdb", "dumbdbm", "sqlite3",
+    "zipfile", "tarfile", "gzip", "bz2", "lzma", "difflib", "filecmp",
+    "fileinput", "fnmatch", "shlex", "tkinter", "Tkinter", "turtle", "cmd",
+    "code", "codeop", "pprint", "reprlib", "repr", "numbers", "cmath",
+    "sched", "mutex", "sgmllib", "htmllib", "HTMLParser", "html", "formatter",
+    "robotparser", "cgi", "cgitb", "wsgiref", "webbrowser", "mimetypes",
+    "mailbox", "mailcap", "quopri", "uu", "binhex", "encodings", "colorsys",
+    "imghdr", "sndhdr", "ossaudiodev", "audioop", "aifc", "sunau", "wave",
+    "chunk", "keyword", "token", "tokenize", "tabnanny", "py_compile",
+    "compileall", "symbol", "parser", "symtable", "modulefinder", "pyclbr",
+    "ensurepip", "venv", "zipapp", "test", "lib2to3", "idlelib",
+    "turtledemo", "this", "antigravity", "setuptools", "pkg_resources", "pip",
 }
 
 
@@ -176,7 +223,13 @@ def extract(repo: str, work_dir: Path, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for f in result.py_files:
         content = _run(["git", "show", f"{result.py2_commit}:{f}"], cwd=repo_dir)
-        dest = out_dir / Path(f).name  # flatten - stress tests are single-directory
+        # Preserve the real relative path (package/test-directory structure
+        # intact) - flattening here previously masked real multi-file import
+        # bugs (docs/bug-log.md #13's own repro turned out to be an artifact
+        # of this flattening, not a genuine ingest()/sandbox gap - ingest()
+        # itself never flattens anything).
+        dest = out_dir / f
+        dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content)
     print(f"extracted {len(result.py_files)} files from {repo} @ {result.py2_commit} -> {out_dir}")
 

@@ -33,6 +33,18 @@ def find_lib2to3_findings(source: str) -> list[Py2Finding]:
         rt.driver.grammar = pygram.python_grammar_no_print_statement
     try:
         tree = rt.driver.parse_string(source)
+    except Exception:
+        # Real, confirmed case: a file with no trailing newline raised a raw,
+        # uncaught lib2to3 ParseError here - propagating uncaught (the old
+        # bare try/finally only restored the grammar, never actually caught
+        # anything) meant this ran and crashed BEFORE deterministic_transform
+        # got a chance to hit the exact same parse failure through its own,
+        # already-correct DeterministicTransformError handling - landing on
+        # a much less informative "unexpected error" instead of a clean
+        # "could not parse original source" message. This function is purely
+        # informational/best-effort (see docstring) - deterministic_transform
+        # is what actually needs to succeed, and it already handles this.
+        return []
     finally:
         rt.driver.grammar = rt.grammar
 

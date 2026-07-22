@@ -45,6 +45,15 @@ def ingest(
     for path in candidates:
         size = path.stat().st_size
         source = path.read_text(errors="replace")
+        if source and not source.endswith("\n"):
+            # A missing trailing newline is semantically inert - Python runs
+            # the script identically either way - but lib2to3's tokenizer
+            # genuinely can't parse it at all (real, confirmed case:
+            # `requests/__init__.py`, docs/bug-log.md #18's stress-test
+            # discovery), raising a raw parse error before ANY findings,
+            # transform, or verification can even start. Normalized once
+            # here rather than patched around in every downstream consumer.
+            source += "\n"
         unit = FileUnit(path=path, original_source=source)
         if size > max_file_bytes:
             unit.status = Status.NEEDS_REVIEW

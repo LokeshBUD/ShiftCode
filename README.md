@@ -206,22 +206,24 @@ src/shiftcode/
 │   ├── ingest.py                # file discovery
 │   ├── analyze.py               # lib2to3 dry-run + ast semantic scan
 │   ├── call_sites.py            # AST call-site evidence extraction (Mode C)
+│   ├── dependencies.py          # local-import resolution, dependency closure, topological order
 │   ├── transform/deterministic.py  # the zero-LLM mechanical fixer pass
 │   ├── verify/
 │   │   ├── syntax_gate.py
 │   │   ├── behavior_gate.py     # Mode A / Mode B
 │   │   ├── characterization_gate.py  # Mode C
 │   │   ├── determinism.py
-│   │   └── sandbox_runtime.py   # containerized py2/py3 execution + fallback policy
+│   │   └── sandbox_runtime.py   # containerized py2/py3 execution + fallback policy + closure-aware sandbox tree
 │   ├── repair.py                # Auditor<->Refactorer loop, wires every gate
-│   ├── orchestrator.py          # top-level per-file wiring
+│   ├── orchestrator.py          # two-phase (transform, then dependency-ordered repair) per-project wiring
 │   └── report.py                # JSON + text report rendering
 ├── models/                      # Pydantic (agent I/O) + dataclasses (internal state)
 └── vendor/lib2to3/               # vendored stdlib lib2to3 (removed from Python 3.13+)
 
 tests/
-├── unit/                        # 80 tests, all run against stubbed providers/runtimes
-└── fixtures/sample_project_py2/ # real py2 fixture exercising every mode and evidence tier
+├── unit/                          # tests, all run against stubbed providers/runtimes
+├── fixtures/sample_project_py2/   # real py2 fixture exercising every mode and evidence tier
+└── fixtures/sample_multi_file_py2/  # real, executed multi-file imports (package + plain sibling-module)
 
 scripts/
 ├── vendor_lib2to3.py             # re-vendor lib2to3 from a source Python install
@@ -262,29 +264,48 @@ crashed/blocked runs too, not just wins.
 
 | # | Library | Pair | Outcome | Status |
 |---|---------|------|---------|--------|
+| 9 | [`requests`](https://github.com/kennethreitz/requests) | py2→py3 | first real multi-file library stress-tested; `requests/core.py` and a nested vendored submodule reach `VERIFIED_INFERRED`; `requests/__init__.py` reaches real Mode A (its own test suite correctly fails on live network calls, blocked by the sandbox's own `--network none` isolation — not a bug) | complete |
+| 8 | [`purl`](https://github.com/codeinthehole/purl) (re-validated, real nested layout) | py2→py3 | `purl/__init__.py` reaches genuine real `VERIFIED` via Mode A — real multi-file dependency-aware sandboxing closes the original false-`VERIFIED` bug for good | complete |
+| 7 | [`schedule`](https://github.com/dbader/schedule) | py2→py3 | `__init__.py` reaches genuine `VERIFIED_INFERRED` — 9 auto-generated characterization tests pass on both interpreters | complete — clean confirmation run, no new bugs |
+| 6 | [`html2text`](https://github.com/aaronsw/html2text) | py2→py3 | no test suite (deliberately chosen); found and fixed a diagnostic-clarity bug on an obscure `lib2to3`-unfixable construct | complete |
+| 5 | [`purl`](https://github.com/codeinthehole/purl) | py2→py3 | found and fixed a real, high-value bug — a false `VERIFIED` caused by both interpreters failing test collection identically | complete |
+| 4 | [`jsonschema`](https://github.com/python-jsonschema/jsonschema) | py2→py3 | `jsonschema.py` runs its real 209-test suite via Mode A (was silently only 12); found and fixed 3 real bugs | complete |
 | 3 | [`inflection`](https://github.com/jpvanhal/inflection) | py2→py3 | `inflection.py` reaches real `VERIFIED` — its real pytest suite passes on both interpreters | complete |
 | 2 | [`python-slugify`](https://github.com/un33k/python-slugify) | py2→py3 | `__init__.py` reaches `VERIFIED_INFERRED` — all 5 auto-generated characterization tests pass on both interpreters | complete |
 | 1 | [`docopt`](https://github.com/docopt/docopt) | py2→py3 | real corruption bug found *and correctly fixed*; `docopt.py` reaches real `VERIFIED` end-to-end | complete — first file to reach real `VERIFIED` on real historical code |
 
-All three libraries are now fully resolved with no open blockers. The
-original blocker all three converged on — bare sandbox images with no
-dependencies installed, not even `pytest` itself — is fixed and confirmed
-(`docs/bug-log.md` #5). Unblocking it surfaced two further real migration-
-correctness bugs, both found, fixed, and confirmed live on the original code
-that found them (`docs/bug-log.md` #7, #8).
+Nine runs, all fully resolved with no open blockers. `purl`'s original
+false-`VERIFIED` finding (`docs/bug-log.md` #13) turned out to need real
+multi-file dependency-aware sandboxing to close for good, not just a narrow
+special case — built and confirmed via a purpose-built fixture
+(`tests/fixtures/sample_multi_file_py2/`) before re-validating against
+`purl` itself with its real nested directory structure preserved, and then
+`requests` — the first genuinely popular, widely-depended-on real library
+stress-tested this way. The original blocker the first three runs converged
+on — bare sandbox images with no dependencies installed, not even `pytest`
+itself — is fixed and confirmed (`docs/bug-log.md` #5). Each round of
+stress testing has found further real bugs by unblocking deeper
+verification on the same or new code, not by construction — see
+`docs/stress-test-log.md` for exactly what each run found and why.
 
-Full detail, including exactly what each run found and why:
-`docs/stress-test-log.md`. The process every run follows:
+Full detail: `docs/stress-test-log.md`. The process every run follows:
 `docs/stress-test-methodology.md`.
 
 ## Known limitations
 
 - Python 2 → Python 3 only; no other language pair implemented.
-- File-at-a-time; no cross-file/package-level migration (e.g. import graph
-  rewrites spanning multiple files).
-- Mode C's call-site evidence uses heuristic name matching, not a real
-  import-resolution graph — it can occasionally match an unrelated symbol
-  with the same name in a different module.
+- Migration itself (the Planner/Refactorer/Auditor loop) is still one file
+  at a time — each file gets its own plan and its own repair loop, with no
+  coordinated cross-file edit. Verification, however, is now real and
+  multi-file-aware: `pipeline/dependencies.py` resolves a file's actual
+  local imports (heuristic AST-based matching, same limits as call-site
+  evidence below) and mounts the whole resulting closure into the sandbox
+  at its real relative paths, so `from . import helpers`-style sibling and
+  package imports resolve for real instead of failing identically on both
+  interpreters.
+- Mode C's call-site evidence and the local-import resolution above both use
+  heuristic name matching, not a real import-resolution graph — either can
+  occasionally match an unrelated symbol/module with the same name.
 - No multi-repo/batch orchestration yet.
 - The Refactorer's symbol-splice targets top-level functions, classes, and
   methods; module-level scattered edits fall back to full-file replacement.
@@ -302,11 +323,27 @@ Full detail, including exactly what each run found and why:
 `docs/bug-log.md` tracks real bugs found in ShiftCode itself — mostly via
 stress-testing against real external code, not the bundled fixtures — with
 root cause and what now catches that class of bug going forward (a fix, a
-new gate, or a new agent). Eight entries so far: two vendored-fixer/gate
-bugs found on `docopt` (a shadowed-identifier corruption and a vacuous Mode
-A pass), a crash-isolation bug and a diagnostic-clarity gap found on
-`python-slugify`, a sandbox-dependency blocker confirmed independently on
-two different libraries (now fixed), a repair-loop gap still open, and two
-further real migration-correctness bugs (a legacy `types` import with no
-Python 3 equivalent, and a `.encode()` bytes/str trap) found immediately
-after the dependency fix unblocked deeper verification on the same code.
+new gate, or a new agent). 18 entries so far, all found via genuine stress
+testing against real libraries: two vendored-fixer/gate bugs on `docopt`
+(shadowed-identifier corruption, vacuous Mode A pass), a crash-isolation bug
+and a diagnostic-clarity gap on `python-slugify`, a sandbox-dependency
+blocker confirmed independently on two libraries (fixed), a repair-loop gap
+still open (#6), two migration-correctness bugs found once the dependency
+fix unblocked deeper verification (a legacy `types` import, a `.encode()`
+bytes/str trap), three bugs found together on `jsonschema` (a missing
+test-file-naming convention, a test file wrongly treated as library code,
+and a test file that itself needed migrating before running on Python 3), a
+high-value vacuous-pass variant found on `purl` (both interpreters failing
+identically was scored as a match), a diagnostic-clarity fix found on
+`html2text` (an obscure construct with no mechanical fixer produced a
+confusing error instead of a clear one), a real multi-file dependency-aware
+sandboxing feature built to close the `purl` finding for good (real, not
+narrow — a shared local-import resolver, transitive closure, and
+topological repair ordering), two further bugs that surfaced while
+validating it (a leaf module missing its own package's `__init__.py`; Mode
+C comparing raw `repr()` strings instead of actual values), a test-discovery
+gap for a package's test suite living in a sibling `tests/` directory (found
+and fixed, confirmed on both `purl` and `requests`), and a parse-crash
+diagnostic-clarity bug found on `requests` (a missing trailing newline
+crashed past an already-correct error handler; fixed at the root by
+normalizing it once at ingest, since it's semantically inert).

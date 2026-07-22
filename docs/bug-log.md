@@ -10,6 +10,126 @@ Format: newest first.
 
 ---
 
+## 18. `find_lib2to3_findings` had no exception handling around its own parse call - a raw lib2to3 `ParseError` crashed past `deterministic_transform`'s already-correct handling
+
+**Found via:** `kennethreitz/requests` @ `a16278e8` (first real multi-file library stress-tested after multi-file sandboxing landed). `requests/__init__.py` and `requests/packages/__init__.py` both have no trailing newline - real, legitimate content, but something lib2to3's tokenizer/parser can't handle. Both landed on `NEEDS_REVIEW` with a confusing `"unexpected error while processing this file: bad input: type=0, value='', context=('\n', (5, 0))"` message instead of the clean `DeterministicTransformError` diagnosis that already exists for exactly this failure mode.
+
+**Root cause:** `_process_file_phase_a` calls `find_lib2to3_findings(original_source)` *before* `deterministic_transform(original_source)` - both parse the same source with lib2to3. `find_lib2to3_findings`'s own parse call was wrapped in `try/finally` (not `try/except`) - the `finally` only restored the grammar attribute, never actually caught anything, so a real `ParseError` propagated straight through, uncaught, before `deterministic_transform`'s own try/except (which already correctly wraps this exact failure as `DeterministicTransformError`) ever got a chance to run. The crash bypassed the good handling entirely and was instead caught by `run_migration`'s generic per-file backstop, with a far less informative message.
+
+**Fix:** two parts. (1) `find_lib2to3_findings` now catches any parse failure and returns an empty findings list - it's purely informational/best-effort by its own docstring ("informational context for the Planner, not what actually gets applied"), so degrading gracefully here is correct regardless of what caused the parse failure. (2) The actual trigger - a missing trailing newline - is semantically inert (Python runs a script identically either way) but genuinely unparseable by lib2to3's tokenizer, so `ingest()` now normalizes every file's `original_source` to end with `\n` once, up front, rather than working around the same gap in every downstream lib2to3 consumer.
+
+**Status:** fully fixed, confirmed directly against both real files that found it - `requests/__init__.py` and `requests/packages/__init__.py` both now parse and migrate normally instead of landing on `NEEDS_REVIEW` at all. Unit-tested (`test_analyze.py` for the graceful-degradation fix, `test_ingest.py` for the newline normalization).
+
+---
+
+## 17. `_discover_test_pairs` doesn't recognize a top-level `tests/` directory sibling to the package it tests
+
+**Found via:** real re-validation of `codeinthehole/purl` @ `1db2106` after fixing the extractor's flattening (see bug #13). The real repo's layout is `purl/__init__.py` + a *separate*, top-level `tests/tests.py` (not nested inside `purl/`) - a real, common convention (Django apps and many other real packages use exactly this shape), distinct from every convention `_discover_test_pairs` currently recognizes (`test_<name>.py` beside the module, `tests.py`/`test.py` beside the module, or - the fix added alongside this stress-test round - a package-named `test_<pkgname>.py` inside or beside the package directory). None of those match "a `tests/` directory as a sibling of the package directory, containing a generically-named `tests.py`."
+
+**Symptom:** `purl/__init__.py` falls through to Mode C (characterization testing) instead of running its real, human-authored test suite via Mode A - not a false result (Mode C correctly reached genuine `VERIFIED_INFERRED`, see bug #13/#16), just a weaker confidence tier than the stronger evidence that was actually available.
+
+**Status:** fixed. `_discover_test_pairs` now also checks a sibling `tests/` directory (one level up from the package) for both a package-named test file (`test_<pkgname>.py` - real shape confirmed on `requests`) and a generically-named one (`tests.py`/`test.py` - real shape confirmed on `purl` itself). Confirmed via direct re-run against the real `purl` extraction: `purl/__init__.py` now reaches genuine `VERIFIED` (not `VERIFIED_INFERRED`) via Mode A, running its real test suite for real - the strongest confidence tier, closing the loop this bug and bug #13 opened together. Unit-tested (`test_discover_test_pairs.py`).
+
+---
+
+## 16. Mode C compared raw `repr()` strings, which is sensitive to dict/set ordering differences that aren't real behavior differences
+
+**Found via:** real re-validation of `codeinthehole/purl` (properly nested this time - see bug #13's fix below) after multi-file sandboxing landed. `purl.parse()` returned the exact same key/value pairs on both interpreters, but Mode C flagged a mismatch: Python 2 dicts have no ordering guarantee, Python 3.7+ guarantees insertion order, so the *same* dict can legitimately `repr()` differently on each side. The comparison (`py2_val != py3_val` on raw repr strings) treated that as a real behavioral difference.
+
+**Root cause:** comparing string reprs instead of the actual values - a false positive, same shape as bug #8's "compares interpreter-formatted text, not meaning" class, but on Mode C's result-comparison path rather than a source-code construct.
+
+**Fix:** `characterization_gate.py` gained `_values_equal`, which parses both reprs via `ast.literal_eval` (same safety posture as `args_literal` - never `eval()`) and compares the actual parsed values; falls back to the previous plain string comparison when the repr isn't literal-parseable (e.g. a custom object's repr), so nothing regresses for cases this can't safely improve on.
+
+**Status:** fixed, confirmed via direct re-run against the real `purl` case that found it (`purl/__init__.py` now reaches genuine `VERIFIED_INFERRED` instead of a false mismatch), unit-tested (`test_characterization_gate.py` - including a real-difference-hidden-in-a-dict case that must still correctly fail).
+
+---
+
+## 15. A leaf module's own package `__init__.py` wasn't in the sandbox when nothing in the module itself imports it
+
+**Found via:** real end-to-end run against the new `tests/fixtures/sample_multi_file_py2/` fixture (built to validate multi-file sandboxing - see bug #13's fix). `mypkg/helpers.py` has zero import statements of its own, so its dependency closure was correctly empty - but verifying it standalone still requires `import mypkg.helpers`, which needs `mypkg/__init__.py` to exist for Python 2 (no namespace-package support there; Python 3 tolerates the gap via implicit namespace packages, which is exactly why this only broke on the py2 side and looked like empty/silent output rather than an obvious error).
+
+**Root cause:** `dependency_closure`'s BFS only follows import *edges* - a package's own `__init__.py` isn't an edge from a module that never imports it (the relationship runs the other way: `__init__.py` imports `helpers`, not vice versa), so it was never included even though it's structurally required for the module's own import path to resolve on py2.
+
+**Fix:** `dependency_closure` now also walks the module's own ancestor directory chain (from its parent up to the sandbox root) and includes each real `__init__.py` found there - but only ones that genuinely exist in the ingested project; a true namespace package with no `__init__.py` anywhere stays exactly that, never synthesized.
+
+**Status:** fixed, confirmed via direct re-run against the fixture that found it (`mypkg/helpers.py` now reaches genuine `VERIFIED_INFERRED`), unit-tested (`test_dependencies.py`, including a test that a genuine namespace package never gets an `__init__.py` invented for it).
+
+---
+
+## 14. A `lib2to3`-unfixable construct surviving into the transformed output produced a confusing raw-traceback message instead of a clean diagnosis
+
+**Found via:** `aaronsw/html2text` @ `7a327b8` (expanded stress-test round, chosen specifically for having no test suite at all). `html2text.py` has an obscure Python 2.2-era compatibility shim - `if not hasattr(__builtins__, 'True'): True, False = 1, 0` - guarding against interpreters old enough to lack `True`/`False` as builtins. `lib2to3` has no fixer for this (a genuinely rare, ancient pattern), so it survives `deterministic_transform` completely unchanged. `find_semantic_findings`'s real `ast.parse()` then correctly rejects it - Python 3 made `True`/`False` reserved keywords, never valid assignment targets - but that raw `SyntaxError` propagated uncaught out of `find_semantic_findings`, through `_process_file`, and was only caught by `run_migration`'s generic per-file backstop (bug #3's crash-isolation fix), landing on `NEEDS_REVIEW` with a confusing bare exception string instead of a clear diagnosis.
+
+**Root cause:** `deterministic_transform`'s own parse failures already have a clean, dedicated path (`DeterministicTransformError` → "could not parse original source: ..."), but there was no equivalent for the *output* of a successful transform still not being valid Python 3 - a real, distinct failure mode (lib2to3 successfully handled everything it *does* know about, but missed a construct that keeps the result syntactically invalid).
+
+**Fix:** `_process_file` now catches `SyntaxError` around the `find_semantic_findings` call and reports `NEEDS_REVIEW` with a clear "deterministically-transformed source is not valid Python 3: ..." reason - same safe outcome as before (no crash, no false confidence - bug #3 already guaranteed that), just an honest, readable diagnosis instead of a raw traceback fragment.
+
+**Status:** fixed, confirmed directly (reproduced the exact `SyntaxError` against the real extracted file before fixing), unit-tested (`test_transformed_source_syntax_error.py`). Not attempting to auto-fix this specific construct (e.g. via a new semantic-finding routing it to the Planner) - that's a real, separate, larger design task, not a quick diagnostic-clarity fix; noted as a possible future enhancement, not pursued now.
+
+---
+
+## 13. `__init__.py`-based packages can't be verified when the test suite imports them by package name - `from purl import URL`
+
+**Found via:** `codeinthehole/purl` @ `1db2106` (part of the expanded stress-test round). `purl`'s whole implementation is a single `__init__.py`; its `tests.py` does `from purl import URL`, expecting `purl` to be a real importable package. Mode A's sandbox writes the module as a bare `__init__.py` sitting alone in a flat temp directory, with no `purl/` package directory wrapping it - so `from purl import URL` fails with `ModuleNotFoundError` on *both* interpreters, identically. (This is also what bug #12 was reproduced against - the identical failure this causes is the concrete case that motivated that fix.)
+
+**Root cause:** Mode A/B/C's sandbox construction is file-at-a-time and package-name-unaware - it was designed for the common case of a plain `module.py` importable by its own filename, which doesn't hold for the equally common `package/__init__.py` layout where the package's *directory name* (not "`__init__`") is what real code imports.
+
+**Important correction, found during the fix:** this exact repro turned out to be partly an artifact of `scripts/find_stress_test_candidates.py`'s own `extract()`, which flattened every file into one directory (`dest = out_dir / Path(f).name`) - the real `codeinthehole/purl` repo has genuine `purl/` and `tests/` subdirectories; `ingest()` itself never flattens anything. Fixed the extractor to preserve real relative paths before re-validating, so the "fixed" claim below is against the real nested structure, not a flattened stand-in.
+
+**Fix:** built real multi-file dependency-aware sandboxing rather than a narrow `__init__.py` special case - `pipeline/dependencies.py` (AST-based local-import resolution, transitive closure, topological ordering for the repair phase), a shared `write_sandbox_tree` helper that writes a module and its closure at their real relative paths (preserving package structure) instead of flattening, and a two-phase orchestrator split (transform everything first, then repair in dependency order) so a dependent file can use its dependencies' freshest available candidate. Full design in the session's plan document; see bugs #15 and #16 for two further real bugs this surfaced and fixed along the way.
+
+**Status:** fixed and confirmed via real re-extraction (fixed extractor) and re-run: `purl/__init__.py` now reaches genuine `VERIFIED_INFERRED` (real Mode C characterization tests, correctly resolving `from purl import URL`-style self-imports) instead of the original false `VERIFIED`. Not a Mode A pass specifically - `purl`'s real test suite lives in a top-level `tests/` directory sibling to the package (`tests/tests.py`), a distinct, real, still-open test-discovery convention gap (not what this bug was about) noted separately below as a known limitation, lower priority, same disposition as bug #6.
+
+---
+
+## 12. Both interpreters failing test collection in the exact same way was scored as a PASS
+
+**Found via:** same `purl` run as bug #13, direct reproduction against the real sandbox container. `from purl import URL` (see #13) raised `ModuleNotFoundError` identically on both py2 and py3. pytest's `--junit-xml` represents a collection-level failure as one synthetic `<testcase>` entry (not zero, not per-real-test) - both sides produced the exact same single `ERROR` entry, which trivially "matched" under plain outcome comparison and reported `PASS` with a stdout-differs note, even though no real test assertion had run on either side.
+
+**Root cause:** the existing zero-tests vacuous-pass guard (bug #2) only catches the *empty*-outcomes case. A collection-level error produces a *non-empty* outcome dict (one synthetic entry), so it slipped past that guard entirely - same underlying principle ("an empty or degenerate comparison must never read as agreement"), different mechanism than #2, so the existing check didn't generalize to it automatically.
+
+**Fix:** `run_mode_a` now also checks whether *every* entry on both sides is `ERROR` - if so, treats it the same as the zero-tests case (`UNVERIFIED`, not `PASS`). Deliberately conservative: only triggers when literally everything on both sides is `ERROR`, so a real mix of genuine per-test outcomes plus an unrelated error entry is never swallowed by this guard.
+
+**Status:** fixed, unit-tested (`test_verify_gates.py`) - both the vacuous-match case and a real-outcomes-mixed-with-an-error case that must NOT trigger the guard.
+
+---
+
+## 11. Test files themselves are py2 source too, but Mode A never migrates them - `__metaclass__` silently no-ops on Python 3
+
+**Found via:** expanded stress-test round (`python-jsonschema/jsonschema` @ `f72f335`), the first library specifically chosen to exercise Mode A against real historical code again since bug #5's fix. `jsonschema.py` failed Mode A with `py3=?` for *every single test* - not a handful, all of them - which was itself the tell that something structural was wrong, not a real per-test behavior difference.
+
+**Root cause, confirmed via direct reproduction (not guessed):** `run_mode_a` copies `test_source` completely unmodified to both the py2 and py3 sandboxes - only the *module under test* gets ShiftCode's migration applied, never the test file itself. `jsonschema`'s `tests.py` uses `__metaclass__ = ParametrizedTestCase` (Python 2's class-attribute metaclass syntax) to dynamically generate dozens of named test methods (`test_additionalItems_additional`, etc.) from a table of parameters. On Python 3, `__metaclass__ = X` is valid syntax but does *nothing at all* - it's just an inert class attribute; Python 3 needs `class Foo(Base, metaclass=X):` instead. No error, no crash - just an entirely different, disjoint set of test names collected on each side (py3 fell back to the 12 raw, unexpanded parametrized function names instead of the ~200 dynamically-generated ones). Confirmed directly: ran the real extracted `tests.py` against the real `shiftcode-py3-sandbox` container by hand - 12 tests collected, not the ~200 that ran on py2.
+
+**Fix:** `behavior_gate.py`'s `run_mode_a` now runs the same zero-LLM `deterministic_transform` (mechanical `lib2to3` fixers only, exactly what already happens to the module under test) on `test_source` before writing it into the *py3* sandbox specifically - the py2 sandbox still gets the untouched original source, since that's the ground truth being compared against. `lib2to3`'s vendored `fix_metaclass` already handles this exact pattern mechanically and unambiguously; no LLM judgment needed.
+
+**Status:** fixed and confirmed via direct reproduction against the real extracted `tests.py`: after the transform, `__metaclass__ = X` correctly becomes `class TestValidate(unittest.TestCase, metaclass=X):`, and the same real container now collects 209 tests (matching py2's universe) instead of 12 - surfacing 3 *genuine* remaining content differences (repr/ordering, not the metaclass artifact) instead of ~200 false mismatches. Unit-tested (`test_verify_gates.py`).
+
+---
+
+## 10. A test file with a name that doesn't fit `test_<name>.py` gets characterization-tested as if it were library code
+
+**Found via:** same `jsonschema` run as bug #11 - `tests.py` (no underscore) doesn't match `is_test_file`'s `startswith("test_")` check anywhere in the pipeline, so it was treated as an ordinary library module: Mode C ran, guessing inputs for its own `test_xxx` methods as if they were real API, and it reached `VERIFIED_INFERRED` - a meaningless result for a file that's actually a test suite, not something anyone migrates "behavior" for in that sense.
+
+**Root cause:** `is_test_file` was checked independently in two places (`pipeline/repair.py`'s `verify_candidate`, `pipeline/orchestrator.py`'s `_process_file`) with the same narrow `startswith("test_")` predicate - matching bug #7/#8's shape of "a real, common convention just wasn't in the recognized set."
+
+**Fix:** one shared `is_test_filename()` predicate in `repair.py` (`test_<name>.py`, `tests.py`, `test.py` - the same three conventions `_discover_test_pairs` already recognizes for *pairing* a module with its tests, see below), used everywhere a file needs to be recognized as "this is a test file, not something to characterization-test."
+
+**Status:** fixed, unit-tested (`test_is_test_filename.py`).
+
+---
+
+## 9. `_discover_test_pairs` only recognized `test_<name>.py`, missing the equally common single `tests.py`/`test.py` convention
+
+**Found via:** same `jsonschema` run - `jsonschema.py` has a real, human-authored `tests.py`, but the `test_<name>.py` naming check (`test_jsonschema.py`) never matched, so Mode A never even ran for the module that most needed it (the whole point of picking this library was to exercise Mode A against real historical code again after bug #5's fix). Also affects `purl/__init__.py` + `tests.py` from the same stress-test round.
+
+**Root cause:** `_discover_test_pairs` only ever checked for `test_<module-filename>.py`, missing the well-established convention (used by both `jsonschema` and `purl`, two independent real libraries) of a single `tests.py`/`test.py` testing a small package's one real module directly.
+
+**Fix:** added a scoped fallback - when the primary `test_<name>.py` pattern doesn't match, check for a generic `tests.py`/`test.py` in the same directory, but *only* when this file is the sole real (non-test, non-`setup.py`/`conf.py`) module in that directory. Deliberately narrow: a multi-file package's unrelated files must never each get paired with someone else's test suite just because a shared `tests.py` happens to exist nearby.
+
+**Status:** fixed, confirmed directly against the real extracted `jsonschema`/`purl` directories (both now pair correctly), unit-tested (`test_discover_test_pairs.py`).
+
+---
+
 ## 8. `unicodedata.normalize(...).encode(...)` silently becomes `bytes` in Python 3, breaking every later string operation
 
 **Found via:** re-running `python-slugify` and `jpvanhal/inflection` after

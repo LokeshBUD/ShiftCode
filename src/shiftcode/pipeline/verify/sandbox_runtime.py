@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from shiftcode.config import ShiftConfig
+from shiftcode.pipeline.dependencies import ClosureFile
 
 
 @dataclass
@@ -70,12 +71,18 @@ class SandboxRuntime:
         xml_content = xml_path.read_text() if xml_path.is_file() else ""
         return proc, xml_content
 
-    def run_script(self, script_path: Path, *, timeout: float = 30) -> subprocess.CompletedProcess:
-        cwd = script_path.parent
+    def run_script(self, cwd: Path, script_rel_path: Path, *, timeout: float = 30) -> subprocess.CompletedProcess:
+        """`cwd` is the real sandbox root (mounted whole into Docker), `script_rel_path`
+        is the script's path relative to it - NOT necessarily its immediate parent
+        directory. Deriving cwd from the script's own parent (the old behavior)
+        silently broke any sibling-import closure living outside that one
+        subdirectory - mounting `cwd/mypkg` instead of all of `cwd` hides everything
+        else in the closure from the container. Matches run_pytest's existing
+        (already-correct) calling convention."""
         if self.kind == "docker":
-            cmd = [*self._base_cmd(cwd), script_path.name]
+            cmd = [*self._base_cmd(cwd), str(script_rel_path)]
             return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        cmd = [*self._base_cmd(cwd), str(script_path)]
+        cmd = [*self._base_cmd(cwd), str(cwd / script_rel_path)]
         return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout)
 
 
@@ -208,3 +215,32 @@ def resolve_execution_runtimes(config: ShiftConfig) -> ExecutionRuntimes:
     py3_for_c = py3_sandbox  # no local fallback - unavailable means Mode C is skipped
 
     return ExecutionRuntimes(py2=py2, py3_for_ab=py3_for_ab, py3_for_c=py3_for_c)
+
+
+def write_sandbox_tree(
+    base_dir: Path,
+    module_rel_path: Path,
+    module_source: str,
+    closure: list[ClosureFile],
+    *,
+    side: str,
+) -> None:
+    """Writes the module under test at its REAL relative path (not just its
+    basename) plus every dependency in its closure at ITS real relative
+    path, preserving package structure - so `from mypkg import helpers`-
+    style sibling/package imports resolve exactly as they would in the real
+    project instead of failing identically on both interpreters (see
+    docs/bug-log.md #12, #13). Shared by Mode A/B/C and determinism checks,
+    all of which write into a Docker-mounted (or local) working directory -
+    the mount is already recursive, no sandbox_runtime changes needed beyond
+    this helper. `side` selects which of a ClosureFile's two sources to
+    write: "py2" for the untouched original, "py3" for its best-available
+    candidate. Files with an empty closure behave byte-for-byte identically
+    to a flat single-file write - this is purely additive."""
+    target = base_dir / module_rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(module_source)
+    for dep in closure:
+        dep_target = base_dir / dep.rel_path
+        dep_target.parent.mkdir(parents=True, exist_ok=True)
+        dep_target.write_text(dep.source_py2 if side == "py2" else dep.source_py3)

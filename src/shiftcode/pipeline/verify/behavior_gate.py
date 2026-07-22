@@ -5,7 +5,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from shiftcode.models import BehaviorResult, GateOutcome
-from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime
+from shiftcode.pipeline.dependencies import ClosureFile
+from shiftcode.pipeline.transform.deterministic import (
+    DeterministicTransformError,
+    deterministic_transform,
+)
+from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime, write_sandbox_tree
 
 
 def _default_local_py3() -> SandboxRuntime:
@@ -74,12 +79,18 @@ def run_mode_a(
     py2_runtime: SandboxRuntime,
     py3_runtime: SandboxRuntime | None = None,
     timeout: float = 30,
+    dependency_closure: list[ClosureFile] | None = None,
+    module_rel_path: Path | None = None,
 ) -> BehaviorResult:
     """Run the existing test suite under both interpreters via pytest (natively
     discovers both unittest.TestCase and bare-assert pytest-style suites, unlike
     `python -m unittest` - see docs/bug-log.md #5), compare per-test outcome and
     full stdout (not just exit code - a print-based side effect could differ
-    while assertions still coincidentally pass)."""
+    while assertions still coincidentally pass). `dependency_closure`/
+    `module_rel_path` let a module with real sibling-file imports resolve them
+    for real inside the sandbox instead of failing identically on both
+    interpreters (docs/bug-log.md #12, #13) - both default to the empty/flat
+    case, byte-for-byte identical to before this parameter existed."""
     if not py2_runtime.available:
         return BehaviorResult(
             outcome=GateOutcome.UNVERIFIED,
@@ -88,12 +99,30 @@ def run_mode_a(
         )
 
     py3_runtime = py3_runtime or _default_local_py3()
+    closure = dependency_closure or []
+    rel_path = module_rel_path or Path(module_filename)
+
+    # The test file is real py2 source too, same as the module under test -
+    # running it unmigrated on the py3 side breaks any test file that uses a
+    # py2-only construct that's syntactically legal but silently different on
+    # py3 (confirmed real case: `__metaclass__ = X`, valid Python 3 syntax
+    # but simply ignored there instead of invoking the metaclass, versus
+    # `class Foo(Base, metaclass=X):` - not an error, just an entirely
+    # different, disjoint set of dynamically-generated test names collected
+    # on each side, which shows up as every single test looking like a
+    # mismatch). Mechanical-only, zero LLM, mirrors exactly what already
+    # happens to the module itself; py2 side keeps the untouched original
+    # source, since that's the ground truth being compared against.
+    try:
+        test_source_py3 = deterministic_transform(test_source)
+    except DeterministicTransformError:
+        test_source_py3 = test_source
 
     with tempfile.TemporaryDirectory() as py2_dir, tempfile.TemporaryDirectory() as py3_dir:
-        (Path(py2_dir) / module_filename).write_text(module_source_py2)
+        write_sandbox_tree(Path(py2_dir), rel_path, module_source_py2, closure, side="py2")
         (Path(py2_dir) / test_filename).write_text(test_source)
-        (Path(py3_dir) / module_filename).write_text(module_source_py3)
-        (Path(py3_dir) / test_filename).write_text(test_source)
+        write_sandbox_tree(Path(py3_dir), rel_path, module_source_py3, closure, side="py3")
+        (Path(py3_dir) / test_filename).write_text(test_source_py3)
 
         py2_proc, py2_xml = py2_runtime.run_pytest(Path(py2_dir), test_filename, timeout=timeout)
         py3_proc, py3_xml = py3_runtime.run_pytest(Path(py3_dir), test_filename, timeout=timeout)
@@ -108,6 +137,28 @@ def run_mode_a(
             outcome=GateOutcome.UNVERIFIED,
             mode="A",
             detail="pytest discovered 0 tests on both sides - cannot verify",
+        )
+
+    all_names = set(py2_outcomes) | set(py3_outcomes)
+    if all(py2_outcomes.get(n) == "ERROR" and py3_outcomes.get(n) == "ERROR" for n in all_names):
+        # Same failure mode as the zero-tests case above, different
+        # mechanism: a pytest *collection*-level failure (e.g. an ImportError
+        # while loading the test module) produces one synthetic testcase
+        # entry rather than zero - confirmed real case: `from purl import
+        # URL` fails identically on both interpreters because the sandbox's
+        # flat single-file layout doesn't expose the module under its real
+        # package name, not because of any actual py2/py3 behavior
+        # difference. That identical failure trivially "matches" under plain
+        # outcome comparison, which would otherwise report a vacuous PASS -
+        # no real test assertion ever ran on either side, so nothing about
+        # actual behavior was compared (docs/bug-log.md #12).
+        return BehaviorResult(
+            outcome=GateOutcome.UNVERIFIED,
+            mode="A",
+            detail=(
+                "test collection failed identically on both interpreters (no real test "
+                "assertions ran on either side) - cannot verify behavior this way"
+            ),
         )
 
     mismatches = []
@@ -158,6 +209,8 @@ def run_mode_b(
     py2_runtime: SandboxRuntime,
     py3_runtime: SandboxRuntime | None = None,
     timeout: float = 30,
+    dependency_closure: list[ClosureFile] | None = None,
+    module_rel_path: Path | None = None,
 ) -> BehaviorResult:
     """No test suite: for __main__-executable files, diff stdout/stderr/exit code
     between the py2 and py3 runs."""
@@ -169,15 +222,15 @@ def run_mode_b(
         )
 
     py3_runtime = py3_runtime or _default_local_py3()
+    closure = dependency_closure or []
+    rel_path = module_rel_path or Path(module_filename)
 
     with tempfile.TemporaryDirectory() as py2_dir, tempfile.TemporaryDirectory() as py3_dir:
-        py2_path = Path(py2_dir) / module_filename
-        py3_path = Path(py3_dir) / module_filename
-        py2_path.write_text(module_source_py2)
-        py3_path.write_text(module_source_py3)
+        write_sandbox_tree(Path(py2_dir), rel_path, module_source_py2, closure, side="py2")
+        write_sandbox_tree(Path(py3_dir), rel_path, module_source_py3, closure, side="py3")
 
-        py2_proc = py2_runtime.run_script(py2_path, timeout=timeout)
-        py3_proc = py3_runtime.run_script(py3_path, timeout=timeout)
+        py2_proc = py2_runtime.run_script(Path(py2_dir), rel_path, timeout=timeout)
+        py3_proc = py3_runtime.run_script(Path(py3_dir), rel_path, timeout=timeout)
 
     if (
         py2_proc.stdout == py3_proc.stdout

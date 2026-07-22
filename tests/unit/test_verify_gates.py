@@ -46,9 +46,23 @@ class _FakeAvailableRuntime:
     pytest_result: subprocess.CompletedProcess
     pytest_xml: str = ""
     available: bool = True
+    captured_test_source: str | None = None  # set by run_pytest, so a test can inspect what got written
+    # Snapshot of every file under cwd at call time (relative path -> content) -
+    # taken immediately, not deferred, since cwd is a TemporaryDirectory that
+    # gets deleted once the caller's `with` block exits.
+    captured_tree: dict[str, str] | None = None
+
+    def _snapshot(self, cwd) -> dict[str, str]:
+        return {str(p.relative_to(cwd)): p.read_text() for p in cwd.rglob("*") if p.is_file()}
 
     def run_pytest(self, cwd, test_filename, *, timeout=30):
+        self.captured_tree = self._snapshot(cwd)
+        self.captured_test_source = (cwd / test_filename).read_text()
         return self.pytest_result, self.pytest_xml
+
+    def run_script(self, cwd, script_rel_path, *, timeout=30):
+        self.captured_tree = self._snapshot(cwd)
+        return self.pytest_result
 
 
 def _config(**overrides) -> ShiftConfig:
@@ -211,3 +225,135 @@ def test_run_mode_a_does_not_vacuously_pass_when_zero_tests_discovered():
 
     assert result.outcome == GateOutcome.UNVERIFIED
     assert "0 tests" in result.detail
+
+
+_COLLECTION_ERROR_XML = (
+    '<testsuites><testsuite name="pytest">'
+    '<testcase classname="" name="tests"><error message="collection failure">ImportError</error></testcase>'
+    "</testsuite></testsuites>"
+)
+
+
+def test_run_mode_a_does_not_vacuously_pass_when_both_sides_fail_collection_identically():
+    """Regression from a real stress test (purl/__init__.py, docs/bug-log.md
+    #12): `from purl import URL` fails on both interpreters with the same
+    ImportError, since the sandbox's flat layout doesn't expose the module
+    under its real package name. Both sides produce one matching synthetic
+    'ERROR' testcase - a vacuous match, not a real behavior comparison. Same
+    principle as the zero-tests guard above, different mechanism."""
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml=_COLLECTION_ERROR_XML)
+    py3_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml=_COLLECTION_ERROR_XML)
+
+    result = run_mode_a(
+        module_filename="__init__.py",
+        module_source_py2="x",
+        module_source_py3="x",
+        test_filename="tests.py",
+        test_source="",
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+    )
+
+    assert result.outcome == GateOutcome.UNVERIFIED
+    assert "collection failed identically" in result.detail
+
+
+def test_run_mode_a_still_fails_when_one_side_errors_and_other_has_real_outcomes():
+    """A mix of a real per-test outcome plus a collection-shaped ERROR entry
+    must NOT be swallowed by the identical-collection-failure guard - only
+    triggers when literally everything on both sides is ERROR."""
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml=ALL_OK)
+    py3_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml=_COLLECTION_ERROR_XML)
+
+    result = run_mode_a(
+        module_filename="m.py",
+        module_source_py2="x",
+        module_source_py3="x",
+        test_filename="test_m.py",
+        test_source="",
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+    )
+
+    assert result.outcome == GateOutcome.FAIL
+
+
+def test_run_mode_a_deterministically_transforms_test_source_for_py3_side_only():
+    """Regression from a real stress test (jsonschema's tests.py, docs/bug-log.md
+    #9): the test file is real py2 source too, but was being copied verbatim
+    (unmigrated) to BOTH sandboxes. `__metaclass__ = X` is valid Python 3
+    syntax but silently does nothing there (no error) instead of invoking the
+    metaclass - it needs `class Foo(Base, metaclass=X):`. Every single test
+    looked like a py2-vs-py3 mismatch as a result, since Python 3 collected a
+    completely different, disjoint set of dynamically-generated test names."""
+    py2_source_with_iteritems = "for k, v in d.iteritems():\n    pass\n"
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml="")
+    py3_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml="")
+
+    run_mode_a(
+        module_filename="m.py",
+        module_source_py2="x",
+        module_source_py3="x",
+        test_filename="test_m.py",
+        test_source=py2_source_with_iteritems,
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+    )
+
+    # py2 side: untouched original (that's the ground truth being compared against)
+    assert py2_runtime.captured_test_source == py2_source_with_iteritems
+    # py3 side: mechanically transformed - the exact construct that broke silently
+    assert "iteritems" not in py3_runtime.captured_test_source
+    assert ".items()" in py3_runtime.captured_test_source
+
+
+def test_run_mode_a_writes_module_and_closure_at_real_nested_paths():
+    """A package's __init__.py (module_rel_path="mypkg/__init__.py") plus a
+    sibling dependency (docs/bug-log.md #12/#13) must land at their real
+    relative locations in the sandbox, not flattened - this is what makes
+    `from . import helpers`-style imports resolve at all."""
+    from shiftcode.pipeline.dependencies import ClosureFile
+
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml="")
+    py3_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml="")
+    closure = [ClosureFile(rel_path=Path("mypkg/helpers.py"), source_py2="py2 helper\n", source_py3="py3 helper\n")]
+
+    run_mode_a(
+        module_filename="__init__.py",
+        module_source_py2="py2 init\n",
+        module_source_py3="py3 init\n",
+        test_filename="test_mypkg.py",
+        test_source="",
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+        dependency_closure=closure,
+        module_rel_path=Path("mypkg/__init__.py"),
+    )
+
+    assert py2_runtime.captured_tree["mypkg/__init__.py"] == "py2 init\n"
+    assert py2_runtime.captured_tree["mypkg/helpers.py"] == "py2 helper\n"
+    assert py3_runtime.captured_tree["mypkg/__init__.py"] == "py3 init\n"
+    assert py3_runtime.captured_tree["mypkg/helpers.py"] == "py3 helper\n"
+
+
+def test_run_mode_b_writes_module_and_closure_at_real_nested_paths():
+    from shiftcode.pipeline.dependencies import ClosureFile
+
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="out", stderr=""))
+    py3_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="out", stderr=""))
+    closure = [ClosureFile(rel_path=Path("mypkg/helpers.py"), source_py2="py2 helper\n", source_py3="py3 helper\n")]
+
+    run_mode_b(
+        module_filename="cli.py",
+        module_source_py2="py2 cli\n",
+        module_source_py3="py3 cli\n",
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+        dependency_closure=closure,
+        module_rel_path=Path("mypkg/cli.py"),
+    )
+
+    assert py2_runtime.captured_tree["mypkg/cli.py"] == "py2 cli\n"
+    assert py2_runtime.captured_tree["mypkg/helpers.py"] == "py2 helper\n"
+    assert py3_runtime.captured_tree["mypkg/cli.py"] == "py3 cli\n"
+    assert py3_runtime.captured_tree["mypkg/helpers.py"] == "py3 helper\n"

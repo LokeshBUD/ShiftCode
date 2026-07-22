@@ -17,7 +17,7 @@ class _ScriptedRuntime:
     reason: str | None = None
     calls: int = field(default=0)
 
-    def run_script(self, script_path, *, timeout=30):
+    def run_script(self, cwd, script_rel_path, *, timeout=30):
         stdout = self.outputs[self.calls]
         self.calls += 1
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")

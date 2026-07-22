@@ -34,6 +34,11 @@ class ShiftConfig:
     sandbox_cpu_limit: str = "1"
     max_repair_attempts: int = 3
     determinism_runs: int = 3
+    # Cap on a file's transitive local-import dependency closure for
+    # verification sandboxing (dependencies.py) - never silently truncated
+    # beyond this; a file whose closure exceeds it degrades to UNVERIFIED
+    # with a clear reason instead.
+    max_dependency_closure_files: int = 20
 
     def llm_for(self, role: str) -> LLMConfig:
         return self.agent_overrides.get(role, self.llm)
@@ -129,6 +134,7 @@ def load_config(
     sandbox_cpu_limit = table.get("sandbox_cpu_limit", "1")
     max_repair_attempts = cli_max_repair_attempts or table.get("max_repair_attempts", 3)
     determinism_runs = cli_determinism_runs or table.get("determinism_runs", 3)
+    max_dependency_closure_files = table.get("max_dependency_closure_files", 20)
 
     return ShiftConfig(
         llm=llm,
@@ -141,4 +147,5 @@ def load_config(
         sandbox_cpu_limit=sandbox_cpu_limit,
         max_repair_attempts=max_repair_attempts,
         determinism_runs=determinism_runs,
+        max_dependency_closure_files=max_dependency_closure_files,
     )

@@ -26,6 +26,17 @@ def test_find_lib2to3_findings_detects_known_constructs():
     assert all(not f.needs_llm for f in findings)
 
 
+def test_find_lib2to3_findings_degrades_gracefully_on_unparseable_source():
+    """Regression from a real stress test (requests/__init__.py, no trailing
+    newline): lib2to3's own parser raised a raw, uncaught ParseError here,
+    crashing BEFORE deterministic_transform got a chance to hit the exact
+    same failure through its own, already-correct DeterministicTransformError
+    handling. Purely informational/best-effort (see docstring) - must degrade
+    to an empty list, never crash, on anything lib2to3 can't parse."""
+    unparseable = "import packages\nfrom .core import *"  # no trailing newline
+    assert find_lib2to3_findings(unparseable) == []
+
+
 def test_find_semantic_findings_detects_ambiguous_division():
     deterministic_output = deterministic_transform(PY2_SOURCE)
     findings, slices = find_semantic_findings(deterministic_output)

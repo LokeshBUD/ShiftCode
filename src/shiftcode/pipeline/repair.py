@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from shiftcode.agents.auditor import AuditorAgent
@@ -14,6 +15,7 @@ from shiftcode.models import (
     TestCase,
     VerifyResult,
 )
+from shiftcode.pipeline.dependencies import ClosureFile
 from shiftcode.pipeline.verify.behavior_gate import has_main_block, run_mode_a, run_mode_b
 from shiftcode.pipeline.verify.characterization_gate import run_mode_c
 from shiftcode.pipeline.verify.determinism import (
@@ -23,6 +25,18 @@ from shiftcode.pipeline.verify.determinism import (
 )
 from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime
 from shiftcode.pipeline.verify.syntax_gate import check_syntax
+
+
+# Same set of "this is a test file" conventions _discover_test_pairs
+# recognizes when pairing a module with its test suite (test_<name>.py,
+# tests.py, test.py) - kept as one shared predicate so a file recognized as
+# someone's test suite is also never itself treated as ordinary library code
+# to characterization-test. Real gap found via a stress test: jsonschema's
+# `tests.py` (no underscore - the test_<name>.py convention doesn't match at
+# all) was wrongly run through Mode C, characterization-testing its own
+# `test_xxx` methods as if they were library API to guess inputs for.
+def is_test_filename(name: str) -> bool:
+    return name.startswith("test_") or name in ("tests.py", "test.py")
 
 
 @dataclass
@@ -63,12 +77,14 @@ def verify_candidate(
     determinism_runs: int = 3,
     test_info: BehaviorTestInfo | None = None,
     characterization_info: CharacterizationInfo | None = None,
+    dependency_closure: list[ClosureFile] | None = None,
+    module_rel_path: Path | None = None,
 ) -> VerifyResult:
     syntax = check_syntax(candidate_source_py3)
     if not syntax.passed:
         return VerifyResult(syntax=syntax)
 
-    is_test_file = module_filename.startswith("test_")
+    is_test_file = is_test_filename(module_filename)
 
     if test_info is not None:
         behavior = run_mode_a(
@@ -79,6 +95,8 @@ def verify_candidate(
             test_source=test_info.test_source,
             py2_runtime=py2_runtime,
             py3_runtime=py3_runtime,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
         )
     elif is_test_file:
         # A test_*.py file always imports the module(s) it tests, so it can
@@ -97,6 +115,8 @@ def verify_candidate(
             module_source_py3=candidate_source_py3,
             py2_runtime=py2_runtime,
             py3_runtime=py3_runtime,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
         )
     elif characterization_info is not None and characterization_info.cases and py3_runtime_for_c is not None:
         behavior = run_mode_c(
@@ -107,6 +127,8 @@ def verify_candidate(
             py2_runtime=py2_runtime,
             py3_runtime=py3_runtime_for_c,
             evidence_source=characterization_info.evidence_source,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
         )
     else:
         behavior = BehaviorResult(
@@ -126,10 +148,20 @@ def verify_candidate(
         determinism = None
     else:
         py3_runs = capture_py3_script_runs(
-            candidate_source_py3, module_filename, py3_runtime=py3_runtime, n=determinism_runs
+            candidate_source_py3,
+            module_filename,
+            py3_runtime=py3_runtime,
+            n=determinism_runs,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
         )
         py2_runs = capture_py2_script_runs(
-            py2_runtime, original_source_py2, module_filename, n=determinism_runs
+            py2_runtime,
+            original_source_py2,
+            module_filename,
+            n=determinism_runs,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
         )
         determinism = check_determinism(py3_outputs=py3_runs, py2_outputs=py2_runs)
 
@@ -188,6 +220,8 @@ def migrate_file(
     test_info: BehaviorTestInfo | None = None,
     characterization_info: CharacterizationInfo | None = None,
     on_progress: Callable[[str], None] | None = None,
+    dependency_closure: list[ClosureFile] | None = None,
+    module_rel_path: Path | None = None,
 ) -> FileUnit:
     """Bounded Auditor<->Refactorer loop, wired to every verify gate. Mutates and
     returns file_unit with final_source, verify_result, status, and full
@@ -208,6 +242,8 @@ def migrate_file(
             determinism_runs=determinism_runs,
             test_info=test_info,
             characterization_info=characterization_info,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
         )
         classification = _classify(result)
         file_unit.final_source = candidate
@@ -257,6 +293,8 @@ def migrate_file(
             determinism_runs=determinism_runs,
             test_info=test_info,
             characterization_info=characterization_info,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
         )
         classification = _classify(result)
         failure_detail = _describe_failure(result) if classification == "RETRY" else None

@@ -4,7 +4,8 @@ import tempfile
 from pathlib import Path
 
 from shiftcode.models import DeterminismResult, GateOutcome
-from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime
+from shiftcode.pipeline.dependencies import ClosureFile
+from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime, write_sandbox_tree
 
 
 def _normalize_run(proc: subprocess.CompletedProcess) -> str:
@@ -18,14 +19,21 @@ def capture_py3_script_runs(
     py3_runtime: SandboxRuntime | None = None,
     n: int = 3,
     timeout: float = 30,
+    dependency_closure: list[ClosureFile] | None = None,
+    module_rel_path: Path | None = None,
 ) -> list[str]:
+    """A __main__-executable file with sibling imports hits the same
+    ModuleNotFoundError-on-both-sides problem run_mode_b does - this needs the
+    identical closure treatment, called for the same file right alongside it
+    in verify_candidate (docs/bug-log.md #13's design note)."""
     py3_runtime = py3_runtime or SandboxRuntime(available=True, kind="local", interpreter_path=sys.executable)
+    closure = dependency_closure or []
+    rel_path = module_rel_path or Path(module_filename)
     runs = []
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / module_filename
-        path.write_text(source)
+        write_sandbox_tree(Path(tmp), rel_path, source, closure, side="py3")
         for _ in range(n):
-            proc = py3_runtime.run_script(path, timeout=timeout)
+            proc = py3_runtime.run_script(Path(tmp), rel_path, timeout=timeout)
             runs.append(_normalize_run(proc))
     return runs
 
@@ -37,15 +45,18 @@ def capture_py2_script_runs(
     *,
     n: int = 3,
     timeout: float = 30,
+    dependency_closure: list[ClosureFile] | None = None,
+    module_rel_path: Path | None = None,
 ) -> list[str] | None:
     if not py2_runtime.available:
         return None
+    closure = dependency_closure or []
+    rel_path = module_rel_path or Path(module_filename)
     runs = []
     with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / module_filename
-        path.write_text(source)
+        write_sandbox_tree(Path(tmp), rel_path, source, closure, side="py2")
         for _ in range(n):
-            proc = py2_runtime.run_script(path, timeout=timeout)
+            proc = py2_runtime.run_script(Path(tmp), rel_path, timeout=timeout)
             runs.append(_normalize_run(proc))
     return runs
 
