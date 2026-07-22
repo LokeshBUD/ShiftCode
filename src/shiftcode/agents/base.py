@@ -1,16 +1,23 @@
 import ast
+import time
 from importlib import resources
-from typing import TypeVar
+from typing import Callable, TypeVar
 
 from pydantic import BaseModel
 
 from shiftcode.llm.base import LLMProvider
-from shiftcode.llm.errors import LLMOutputError
+from shiftcode.llm.errors import LLMConnectionError, LLMOutputError, LLMRateLimitError, LLMTimeoutError
 from shiftcode.models.agent_io import SymbolBlock
 
 T = TypeVar("T", bound=BaseModel)
 
 MODULE_SENTINEL = "__module__"
+
+# Transient failures worth retrying (with backoff, same prompt) - a timeout or
+# a dropped connection says nothing about whether the request itself was
+# good, unlike a malformed-output response. Deliberately excludes
+# LLMAuthenticationError: a bad API key won't fix itself on retry.
+_TRANSIENT_ERRORS = (LLMTimeoutError, LLMConnectionError, LLMRateLimitError)
 
 
 def load_prompt(name: str) -> str:
@@ -19,9 +26,11 @@ def load_prompt(name: str) -> str:
 
 
 class AgentOutputError(Exception):
-    """Raised when an agent's structured output couldn't be parsed even after
-    the bounded retry. Orchestrator treats this as NEEDS_REVIEW, never a
-    silent guess."""
+    """Raised when an agent call could not be completed after its bounded
+    retries - either the output kept failing to parse, or a transient network
+    failure (timeout/connection/rate-limit) kept recurring. Every call site
+    treats this the same way: degrade the one file to NEEDS_REVIEW, never a
+    silent guess, and never let it crash the rest of the run."""
 
 
 def render_prompt(static_prefix: str, dynamic_suffix: str) -> str:
@@ -39,23 +48,40 @@ def call_structured(
     system: str | None = None,
     temperature: float = 0.0,
     max_retries: int = 1,
+    max_transient_retries: int = 3,
+    backoff_seconds: float = 2.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> T:
     last_error: Exception | None = None
     current_prompt = prompt
-    for _ in range(max_retries + 1):
+    output_attempts = 0
+    transient_attempts = 0
+
+    while True:
         try:
             return provider.generate_structured(
                 current_prompt, schema=schema, system=system, temperature=temperature
             )
         except LLMOutputError as exc:
             last_error = exc
+            output_attempts += 1
+            if output_attempts > max_retries:
+                break
             current_prompt = (
                 f"{prompt}\n\n"
                 f"Your previous response could not be parsed as valid {schema.__name__} JSON: {exc}\n"
                 f"Return ONLY a valid JSON object matching the schema, no extra text."
             )
+        except _TRANSIENT_ERRORS as exc:
+            last_error = exc
+            transient_attempts += 1
+            if transient_attempts > max_transient_retries:
+                break
+            sleep_fn(backoff_seconds * transient_attempts)  # linear backoff
+
     raise AgentOutputError(
-        f"could not get valid {schema.__name__} from provider after {max_retries + 1} attempt(s): {last_error}"
+        f"could not get valid {schema.__name__} from provider after retries "
+        f"({output_attempts} output-parse, {transient_attempts} transient-network): {last_error}"
     )
 
 

@@ -13,7 +13,10 @@ def _render_findings(findings: list[Py2Finding]) -> str:
     lines = []
     for f in findings:
         status = "needs your judgment" if f.needs_llm else "mechanically resolved"
-        lines.append(f"- {_finding_ref(f)}: {f.construct_name} ({status})")
+        line = f"- {_finding_ref(f)}: {f.construct_name} ({status})"
+        if f.detail:
+            line += f"\n    {f.detail}"
+        lines.append(line)
     return "\n".join(lines) if lines else "(no py2 constructs found)"
 
 

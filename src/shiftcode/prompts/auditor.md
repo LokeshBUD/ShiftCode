@@ -22,6 +22,10 @@ correction (e.g. "converted `/` to `//`, but line 52 expected float division -
 use `/` without truncation" rather than "fix the division bug").
 
 Output a RepairHint with:
-- root_cause: one short sentence identifying exactly what's wrong.
+- root_cause: one short sentence, max ~15 words, identifying exactly what's
+  wrong.
 - hint: a specific, actionable instruction for what the Refactorer should
-  change on its next attempt.
+  change on its next attempt - concrete and complete, but no longer than it
+  needs to be (2-3 sentences is usually enough; no restating the diff back).
+
+Be terse throughout - no preamble, no restating the prompt back.

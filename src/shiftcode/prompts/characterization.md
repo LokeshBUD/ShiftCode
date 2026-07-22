@@ -7,13 +7,17 @@ real original Python 2 code with the inputs you propose. If you don't know
 what a function does, that's fine: propose plausible inputs and let real
 execution reveal the real behavior.
 
-You will be given, for one function:
+You will be given one or more functions from the same file, each as its own
+section (marked by a "## Function: <name>" header) with:
 - The function's own source code (always available).
 - Its docstring, if one exists.
 - Call-site evidence, if any exists: real places elsewhere in the codebase
   that call this function, with the actual argument values used there
   (literal values only - non-literal arguments show as "<non-literal>"
   since their real value isn't known statically).
+
+Propose test cases for every function given, not just the first one. Judge
+each function independently using the priority order below.
 
 Priority order for deciding what inputs to propose:
 1. If call-site evidence exists with literal argument values, prioritize
@@ -31,8 +35,10 @@ trying an empty one. Propose 2-5 test cases per function: enough to exercise
 both a typical case and the most relevant edge case(s), not exhaustive
 coverage.
 
-Output a CharacterizationTestPlan: a list of TestCases. For each:
-- function_name: the exact function name being tested.
+Output a CharacterizationTestPlan: a single flat list of TestCases covering
+ALL functions given. For each:
+- function_name: the exact function name this case tests (must match one of
+  the given "## Function: <name>" headers).
 - args_literal: a Python TUPLE-LITERAL string of POSITIONAL arguments only,
   e.g. "(10, 4)" for two args, or "()" for no arguments. This MUST be a
   literal tuple containing only literals - numbers, strings, lists, dicts,
@@ -41,5 +47,7 @@ Output a CharacterizationTestPlan: a list of TestCases. For each:
   here - only positional values). It will be parsed with ast.literal_eval,
   which only accepts genuine literal syntax, so anything else will simply
   fail to parse and be discarded.
-- rationale: one short sentence explaining why this input was chosen (e.g.
-  "matches a real call site" / "typical case" / "edge case: zero divisor").
+- rationale: one short phrase (max ~8 words) explaining why this input was
+  chosen (e.g. "matches a real call site" / "edge case: zero divisor").
+
+Be terse throughout - no preamble, no restating the source back.

@@ -13,6 +13,11 @@ class Py2Finding:
     col: int
     fixer_name: str | None
     needs_llm: bool
+    # Optional rich context beyond construct_name, e.g. a TransformAuditor
+    # concern's specific reasoning ("fix_long renamed the `long` parameter,
+    # colliding with..."). Shown to the Planner when present so a finding
+    # sourced from LLM review isn't reduced to a bare label.
+    detail: str | None = None
 
 
 @dataclass

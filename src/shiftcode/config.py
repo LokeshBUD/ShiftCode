@@ -3,7 +3,7 @@ import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-AGENT_ROLES = ("planner", "refactorer", "auditor", "characterization")
+AGENT_ROLES = ("planner", "refactorer", "auditor", "characterization", "transform_auditor")
 
 
 @dataclass
@@ -22,8 +22,14 @@ class ShiftConfig:
     llm: LLMConfig
     agent_overrides: dict[str, LLMConfig]
     py2_interpreter: str | None = None
-    py2_docker_image: str = "python:2.7"
-    py3_docker_image: str = "python:3-slim"
+    # ShiftCode's own images (docker/*-sandbox.Dockerfile): bare python:2.7 /
+    # python:3-slim plus pytest pre-installed, so Mode A can actually run
+    # pytest-style test suites (see docs/bug-log.md #5) without needing
+    # runtime network access - built once, offline, auto-built on first use
+    # if not already present locally (sandbox_runtime.py).
+    py2_docker_image: str = "shiftcode-py2-sandbox"
+    py3_docker_image: str = "shiftcode-py3-sandbox"
+    install_project_dependencies: bool = True
     sandbox_memory_limit: str = "256m"
     sandbox_cpu_limit: str = "1"
     max_repair_attempts: int = 3
@@ -116,8 +122,9 @@ def load_config(
             agent_overrides[role] = _llm_config_from_dict(llm, role_table)
 
     py2_interpreter = cli_py2_interpreter or os.environ.get("SHIFTCODE_PY2_INTERPRETER") or table.get("py2_interpreter")
-    py2_docker_image = table.get("py2_docker_image", "python:2.7")
-    py3_docker_image = table.get("py3_docker_image", "python:3-slim")
+    py2_docker_image = table.get("py2_docker_image", "shiftcode-py2-sandbox")
+    py3_docker_image = table.get("py3_docker_image", "shiftcode-py3-sandbox")
+    install_project_dependencies = table.get("install_project_dependencies", True)
     sandbox_memory_limit = table.get("sandbox_memory_limit", "256m")
     sandbox_cpu_limit = table.get("sandbox_cpu_limit", "1")
     max_repair_attempts = cli_max_repair_attempts or table.get("max_repair_attempts", 3)
@@ -129,6 +136,7 @@ def load_config(
         py2_interpreter=py2_interpreter,
         py2_docker_image=py2_docker_image,
         py3_docker_image=py3_docker_image,
+        install_project_dependencies=install_project_dependencies,
         sandbox_memory_limit=sandbox_memory_limit,
         sandbox_cpu_limit=sandbox_cpu_limit,
         max_repair_attempts=max_repair_attempts,

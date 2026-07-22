@@ -1,7 +1,7 @@
 import ast
-import re
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from shiftcode.models import BehaviorResult, GateOutcome
@@ -10,14 +10,6 @@ from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime
 
 def _default_local_py3() -> SandboxRuntime:
     return SandboxRuntime(available=True, kind="local", interpreter_path=sys.executable)
-
-# Python 2's `unittest -v` verbose format is `test_name (module.Class) ... ok`.
-# Python 3 (3.11+) changed this to `test_name (module.Class.test_name) ... ok` -
-# note the method name repeated inside the parens. Key by the bare method name
-# (group 1) only, not the full "(...)" qualname, so comparing py2 vs py3 outcomes
-# doesn't spuriously mismatch every single test purely on this formatting
-# difference between interpreter versions.
-_TEST_RESULT_RE = re.compile(r"^(\S+) \([\w.]+\) \.\.\. (ok|FAIL|ERROR)\s*$", re.MULTILINE)
 
 
 def has_main_block(source: str) -> bool:
@@ -40,10 +32,36 @@ def _is_name_main_check(test: ast.expr) -> bool:
     return any(n.id == "__name__" for n in names) and "__main__" in consts
 
 
-def _parse_unittest_output(stderr: str) -> dict[str, str]:
-    """`python -m unittest -v` writes per-test result lines to stderr, e.g.
-    'test_foo (mod.Class) ... ok'."""
-    return dict(_TEST_RESULT_RE.findall(stderr))
+def _parse_junit_xml(xml_content: str) -> dict[str, str]:
+    """JUnit XML has a stable schema regardless of interpreter version or
+    test style (unittest.TestCase vs bare assert) - this is what replaced the
+    old regex-parsed `unittest -v` text output, which had two confirmed real
+    bugs stemming from its interpreter-version-dependent formatting
+    (docs/bug-log.md #2, #4). A module-level collection error (e.g. an
+    ImportError from a missing dependency) shows up as its own testcase
+    entry with an <error> child, same as any other failure - no special
+    casing needed, unlike the old approach where this crashed Python 2.7's
+    unittest ungracefully with no parseable output at all."""
+    if not xml_content.strip():
+        return {}
+    try:
+        root = ET.fromstring(xml_content)
+    except ET.ParseError:
+        return {}
+    outcomes = {}
+    for testcase in root.iter("testcase"):
+        name = testcase.get("name", "")
+        if not name:
+            continue
+        if testcase.find("failure") is not None:
+            outcomes[name] = "FAIL"
+        elif testcase.find("error") is not None:
+            outcomes[name] = "ERROR"
+        elif testcase.find("skipped") is not None:
+            outcomes[name] = "SKIPPED"
+        else:
+            outcomes[name] = "ok"
+    return outcomes
 
 
 def run_mode_a(
@@ -53,14 +71,15 @@ def run_mode_a(
     module_source_py3: str,
     test_filename: str,
     test_source: str,
-    test_module_name: str,
     py2_runtime: SandboxRuntime,
     py3_runtime: SandboxRuntime | None = None,
     timeout: float = 30,
 ) -> BehaviorResult:
-    """Run the existing test suite under both interpreters, compare per-test
-    outcome and full stdout (not just exit code - a print-based side effect could
-    differ while assertions still coincidentally pass)."""
+    """Run the existing test suite under both interpreters via pytest (natively
+    discovers both unittest.TestCase and bare-assert pytest-style suites, unlike
+    `python -m unittest` - see docs/bug-log.md #5), compare per-test outcome and
+    full stdout (not just exit code - a print-based side effect could differ
+    while assertions still coincidentally pass)."""
     if not py2_runtime.available:
         return BehaviorResult(
             outcome=GateOutcome.UNVERIFIED,
@@ -76,11 +95,20 @@ def run_mode_a(
         (Path(py3_dir) / module_filename).write_text(module_source_py3)
         (Path(py3_dir) / test_filename).write_text(test_source)
 
-        py2_proc = py2_runtime.run_unittest(Path(py2_dir), test_module_name, timeout=timeout)
-        py3_proc = py3_runtime.run_unittest(Path(py3_dir), test_module_name, timeout=timeout)
+        py2_proc, py2_xml = py2_runtime.run_pytest(Path(py2_dir), test_filename, timeout=timeout)
+        py3_proc, py3_xml = py3_runtime.run_pytest(Path(py3_dir), test_filename, timeout=timeout)
 
-    py2_outcomes = _parse_unittest_output(py2_proc.stderr)
-    py3_outcomes = _parse_unittest_output(py3_proc.stderr)
+    py2_outcomes = _parse_junit_xml(py2_xml)
+    py3_outcomes = _parse_junit_xml(py3_xml)
+
+    if not py2_outcomes and not py3_outcomes:
+        # Zero tests discovered on both sides isn't a pass - an empty
+        # comparison must never read as agreement (docs/bug-log.md #2).
+        return BehaviorResult(
+            outcome=GateOutcome.UNVERIFIED,
+            mode="A",
+            detail="pytest discovered 0 tests on both sides - cannot verify",
+        )
 
     mismatches = []
     for name in sorted(set(py2_outcomes) | set(py3_outcomes)):

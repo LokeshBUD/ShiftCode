@@ -44,3 +44,13 @@ class TestCase(BaseModel):
 
 class CharacterizationTestPlan(BaseModel):
     cases: list[TestCase]
+
+
+class TransformConcern(BaseModel):
+    identifier: str
+    line: int
+    concern: str
+
+
+class TransformAudit(BaseModel):
+    concerns: list[TransformConcern]

@@ -68,11 +68,19 @@ ingest → analyze → deterministic transform → Planner → Refactorer ⇄ Au
 
 ## Agents
 
-Four agents, each with one job, wired through `agents/base.py`'s shared
+Five agents, each with one job, wired through `agents/base.py`'s shared
 `call_structured` helper (structured-output call with a bounded retry, and a
 regex/`ast`-based fallback parser for providers without native structured
 output support):
 
+- **Transform Auditor** (`agents/transform_auditor.py`) — runs once per file,
+  right after the deterministic transform, before anything else. Reviews the
+  mechanical fixer output against the original for silent semantic drift —
+  the deterministic layer is pure pattern matching with no scope/binding
+  analysis, and (found via real stress testing, see `docs/bug-log.md`) can
+  rename an identifier that collides with an unrelated local variable of the
+  same name. Its findings feed into the same finding list everything else
+  reads from — no separate repair path.
 - **Planner** (`agents/planner.py`) — reads the raw file, the full finding
   list, and a dependency slice around each judgment-call finding. Writes *no
   code* — only a step-by-step plan explaining what should change and why.
@@ -192,7 +200,7 @@ src/shiftcode/
 ├── cli.py                      # `shiftcode migrate <path>` entrypoint
 ├── config.py                   # provider config, precedence: CLI > env > pyproject.toml > defaults
 ├── llm/                        # provider abstraction (OpenAI-compatible client)
-├── agents/                     # Planner, Refactorer, Auditor, Characterization
+├── agents/                     # Transform Auditor, Planner, Refactorer, Auditor, Characterization
 ├── prompts/                    # static prompt templates for each agent
 ├── pipeline/
 │   ├── ingest.py                # file discovery
@@ -212,8 +220,17 @@ src/shiftcode/
 └── vendor/lib2to3/               # vendored stdlib lib2to3 (removed from Python 3.13+)
 
 tests/
-├── unit/                        # 75 tests, all run against stubbed providers/runtimes
+├── unit/                        # 80 tests, all run against stubbed providers/runtimes
 └── fixtures/sample_project_py2/ # real py2 fixture exercising every mode and evidence tier
+
+scripts/
+├── vendor_lib2to3.py             # re-vendor lib2to3 from a source Python install
+└── find_stress_test_candidates.py  # dev-only: scouts real GitHub libraries for stress-test targets (zero LLM tokens)
+
+docs/
+├── bug-log.md                   # real bugs found (mostly via stress testing), root cause, fix
+├── stress-test-log.md           # every real library run through the pipeline, outcome, status
+└── stress-test-methodology.md   # the standing find/run/diagnose/design/confirm process
 ```
 
 ## Setup
@@ -230,10 +247,35 @@ the `python:2.7` image pulled. Without one, every behavior gate correctly
 degrades to `UNVERIFIED` rather than fabricating a pass.
 
 ```bash
-pytest                                          # 75 tests, no LLM/Docker required
+pytest                                          # 80 tests, no LLM/Docker required
 shiftcode migrate <path> --dry-run              # list findings only, no LLM calls
 shiftcode migrate <path> --output-dir ./out     # full run
 ```
+
+## Validated against real code
+
+`docs/stress-test-log.md` is a running, honest record of every real-world
+library ShiftCode has actually been run against (not the bundled fixtures —
+real code pulled from GitHub at its real pre-migration commit). A row there
+means "we ran the real pipeline against this," not "this passed" — it tracks
+crashed/blocked runs too, not just wins.
+
+| # | Library | Pair | Outcome | Status |
+|---|---------|------|---------|--------|
+| 3 | [`inflection`](https://github.com/jpvanhal/inflection) | py2→py3 | `inflection.py` reaches real `VERIFIED` — its real pytest suite passes on both interpreters | complete |
+| 2 | [`python-slugify`](https://github.com/un33k/python-slugify) | py2→py3 | `__init__.py` reaches `VERIFIED_INFERRED` — all 5 auto-generated characterization tests pass on both interpreters | complete |
+| 1 | [`docopt`](https://github.com/docopt/docopt) | py2→py3 | real corruption bug found *and correctly fixed*; `docopt.py` reaches real `VERIFIED` end-to-end | complete — first file to reach real `VERIFIED` on real historical code |
+
+All three libraries are now fully resolved with no open blockers. The
+original blocker all three converged on — bare sandbox images with no
+dependencies installed, not even `pytest` itself — is fixed and confirmed
+(`docs/bug-log.md` #5). Unblocking it surfaced two further real migration-
+correctness bugs, both found, fixed, and confirmed live on the original code
+that found them (`docs/bug-log.md` #7, #8).
+
+Full detail, including exactly what each run found and why:
+`docs/stress-test-log.md`. The process every run follows:
+`docs/stress-test-methodology.md`.
 
 ## Known limitations
 
@@ -246,3 +288,25 @@ shiftcode migrate <path> --output-dir ./out     # full run
 - No multi-repo/batch orchestration yet.
 - The Refactorer's symbol-splice targets top-level functions, classes, and
   methods; module-level scattered edits fall back to full-file replacement.
+- Files with zero `needs_llm` findings get exactly one verification attempt,
+  no Auditor diagnosis or retry even on a genuinely fixable failure —
+  see `docs/bug-log.md` #6.
+- Semantic-findings detection (the set of py2/py3 behavior changes that get
+  flagged for LLM judgment) is a growing, evidence-driven list, not
+  exhaustive: ambiguous division, legacy `types` module imports, and the
+  `unicodedata.normalize(...).encode(...)` bytes/str trap so far — each
+  added after being confirmed on real code, not guessed in advance.
+
+## Bug log
+
+`docs/bug-log.md` tracks real bugs found in ShiftCode itself — mostly via
+stress-testing against real external code, not the bundled fixtures — with
+root cause and what now catches that class of bug going forward (a fix, a
+new gate, or a new agent). Eight entries so far: two vendored-fixer/gate
+bugs found on `docopt` (a shadowed-identifier corruption and a vacuous Mode
+A pass), a crash-isolation bug and a diagnostic-clarity gap found on
+`python-slugify`, a sandbox-dependency blocker confirmed independently on
+two different libraries (now fixed), a repair-loop gap still open, and two
+further real migration-correctness bugs (a legacy `types` import with no
+Python 3 equivalent, and a `.encode()` bytes/str trap) found immediately
+after the dependency fix unblocked deeper verification on the same code.

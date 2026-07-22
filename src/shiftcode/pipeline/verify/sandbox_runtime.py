@@ -25,27 +25,50 @@ class SandboxRuntime:
     memory_limit: str = "256m"
     cpu_limit: str = "1"
     reason: str | None = None
+    # Set by dependency_provisioning.py when a project's requirements.txt was
+    # installed into a Docker volume ahead of time - mounted read-only into
+    # every execution container alongside PYTHONPATH, so --network none stays
+    # intact on the containers that actually run migrated/legacy code (the
+    # install itself happened earlier, in a separate, network-enabled,
+    # constrained container - see dependency_provisioning.py).
+    deps_volume: str | None = None
+    deps_mount_path: str = "/deps"
 
     def _base_cmd(self, cwd: Path) -> list[str]:
         if self.kind == "local":
             return [self.interpreter_path]
         if self.kind == "docker":
-            return [
+            cmd = [
                 "docker", "run", "--rm",
                 "--network", "none",
                 "--memory", self.memory_limit,
                 "--cpus", self.cpu_limit,
                 "-v", f"{cwd}:/work", "-w", "/work",
-                self.docker_image, "python",
             ]
+            if self.deps_volume:
+                cmd += ["-v", f"{self.deps_volume}:{self.deps_mount_path}:ro", "-e", f"PYTHONPATH={self.deps_mount_path}"]
+            cmd += [self.docker_image, "python"]
+            return cmd
         raise RuntimeError("sandbox runtime not available")
 
-    def run_unittest(
-        self, cwd: Path, test_module: str, *, timeout: float = 30
-    ) -> subprocess.CompletedProcess:
-        cmd = [*self._base_cmd(cwd), "-m", "unittest", "-v", test_module]
+    def run_pytest(
+        self, cwd: Path, test_filename: str, *, timeout: float = 30
+    ) -> tuple[subprocess.CompletedProcess, str]:
+        """pytest natively discovers and runs both unittest.TestCase and bare
+        `assert`-function test suites through one code path (see
+        docs/bug-log.md #5) - unlike `python -m unittest`, which silently
+        finds nothing for the latter. --junit-xml gives structured, stable
+        per-test results instead of parsing interpreter-version-dependent
+        verbose text (docs/bug-log.md #2, #4). Requires pytest to be
+        installed in the sandbox - ShiftCode's own sandbox images bake it in
+        (docker/*-sandbox.Dockerfile)."""
+        xml_name = "_shiftcode_pytest_results.xml"
+        cmd = [*self._base_cmd(cwd), "-m", "pytest", "-q", f"--junit-xml={xml_name}", test_filename]
         run_cwd = None if self.kind == "docker" else cwd
-        return subprocess.run(cmd, cwd=run_cwd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, cwd=run_cwd, capture_output=True, text=True, timeout=timeout)
+        xml_path = cwd / xml_name
+        xml_content = xml_path.read_text() if xml_path.is_file() else ""
+        return proc, xml_content
 
     def run_script(self, script_path: Path, *, timeout: float = 30) -> subprocess.CompletedProcess:
         cwd = script_path.parent
@@ -83,6 +106,40 @@ def _docker_daemon_reachable() -> bool:
         return False
 
 
+# ShiftCode's own sandbox images (docker/*-sandbox.Dockerfile - bare
+# python:2.7/python:3-slim plus pytest). Auto-built the first time one is
+# needed and not already present locally, so this "just works" without a
+# separate manual step; custom/user-configured image names are left alone -
+# if missing, the later `docker run` fails with Docker's own clear error
+# rather than something silently substituted.
+_KNOWN_SANDBOX_DOCKERFILES = {
+    "shiftcode-py2-sandbox": "py2-sandbox.Dockerfile",
+    "shiftcode-py3-sandbox": "py3-sandbox.Dockerfile",
+}
+
+
+def _image_exists_locally(image: str) -> bool:
+    try:
+        result = subprocess.run(["docker", "image", "inspect", image], capture_output=True, timeout=10)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _ensure_sandbox_image(image: str) -> None:
+    if image not in _KNOWN_SANDBOX_DOCKERFILES or _image_exists_locally(image):
+        return
+    repo_root = Path(__file__).resolve().parents[4]
+    dockerfile = repo_root / "docker" / _KNOWN_SANDBOX_DOCKERFILES[image]
+    if not dockerfile.is_file():
+        return  # not a dev checkout with docker/ present - let `docker run` fail normally
+    subprocess.run(
+        ["docker", "build", "-t", image, "-f", str(dockerfile), str(repo_root)],
+        capture_output=True,
+        timeout=600,
+    )
+
+
 def resolve_py2_runtime(config: ShiftConfig) -> SandboxRuntime:
     """Preflight check, run once: config path -> PATH auto-detect -> Docker fallback."""
     if config.py2_interpreter:
@@ -101,6 +158,7 @@ def resolve_py2_runtime(config: ShiftConfig) -> SandboxRuntime:
             return SandboxRuntime(available=True, kind="local", interpreter_path=found)
 
     if _docker_daemon_reachable():
+        _ensure_sandbox_image(config.py2_docker_image)
         return SandboxRuntime(
             available=True,
             kind="docker",
@@ -124,6 +182,7 @@ def resolve_py3_sandbox(config: ShiftConfig) -> SandboxRuntime:
     """Docker-only py3 resolution (no local fallback baked in here - callers
     decide whether to fall back, per resolve_execution_runtimes's policy)."""
     if _docker_daemon_reachable():
+        _ensure_sandbox_image(config.py3_docker_image)
         return SandboxRuntime(
             available=True,
             kind="docker",

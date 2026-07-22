@@ -1,39 +1,44 @@
-"""Regression test for a real bug found running against a real py2 (Docker) and
-real py3 side by side: Python 2's `unittest -v` verbose format is
-`test_name (module.Class) ... ok`, but Python 3 (3.11+) changed this to
-`test_name (module.Class.test_name) ... ok` - the method name is repeated
-inside the parens. Keying comparisons by the full "(...)" qualname made every
-single test look like a py2-vs-py3 mismatch, even ones that behaved identically.
+"""_parse_junit_xml replaced the old regex-parsed `unittest -v` text parsing
+(docs/bug-log.md #2, #4 - both stemmed from interpreter-version-dependent
+verbose-text formatting). JUnit XML has a stable schema regardless of
+interpreter version or test style, so that bug class no longer applies here;
+these tests just confirm the XML parsing itself.
 """
 
-from shiftcode.pipeline.verify.behavior_gate import _parse_unittest_output
+from shiftcode.pipeline.verify.behavior_gate import _parse_junit_xml
 
-PY2_STYLE_STDERR = """\
-test_add (test_calculator.CalculatorTest) ... ok
-test_divide_preserves_py2_floor_semantics (test_calculator.CalculatorTest) ... ok
+PASSING_XML = """\
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="2">
+<testcase classname="test_calculator" name="test_add" time="0.001" />
+<testcase classname="test_calculator" name="test_divide" time="0.001" />
+</testsuite></testsuites>
 """
 
-PY3_STYLE_STDERR = """\
-test_add (test_calculator.CalculatorTest.test_add) ... ok
-test_divide_preserves_py2_floor_semantics (test_calculator.CalculatorTest.test_divide_preserves_py2_floor_semantics) ... FAIL
+FAILING_XML = """\
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="2">
+<testcase classname="test_calculator" name="test_add" time="0.001" />
+<testcase classname="test_calculator" name="test_divide" time="0.001">
+<failure message="assert 1 == 2">AssertionError</failure>
+</testcase>
+</testsuite></testsuites>
 """
 
 
-def test_parses_py2_style_verbose_output():
-    outcomes = _parse_unittest_output(PY2_STYLE_STDERR)
-    assert outcomes == {"test_add": "ok", "test_divide_preserves_py2_floor_semantics": "ok"}
+def test_parses_all_passing_junit_xml():
+    outcomes = _parse_junit_xml(PASSING_XML)
+    assert outcomes == {"test_add": "ok", "test_divide": "ok"}
 
 
-def test_parses_py3_style_verbose_output():
-    outcomes = _parse_unittest_output(PY3_STYLE_STDERR)
-    assert outcomes == {"test_add": "ok", "test_divide_preserves_py2_floor_semantics": "FAIL"}
+def test_parses_failure_in_junit_xml():
+    outcomes = _parse_junit_xml(FAILING_XML)
+    assert outcomes == {"test_add": "ok", "test_divide": "FAIL"}
 
 
-def test_matching_test_names_compare_equal_across_py2_and_py3_formats():
-    py2 = _parse_unittest_output(PY2_STYLE_STDERR)
-    py3 = _parse_unittest_output(PY3_STYLE_STDERR)
-    # test_add behaves identically and must NOT show up as a mismatch just
-    # because the two interpreters format the test name differently.
-    assert py2["test_add"] == py3["test_add"] == "ok"
-    # the real divide bug must still be visible as a genuine mismatch.
-    assert py2["test_divide_preserves_py2_floor_semantics"] != py3["test_divide_preserves_py2_floor_semantics"]
+def test_empty_xml_yields_no_outcomes():
+    assert _parse_junit_xml("") == {}
+
+
+def test_malformed_xml_yields_no_outcomes():
+    assert _parse_junit_xml("not xml at all") == {}

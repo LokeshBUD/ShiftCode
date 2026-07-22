@@ -3,8 +3,8 @@ import json
 from shiftcode.models import FileUnit, MigrationReport, VerifyResult
 
 
-def build_report(files: list[FileUnit]) -> MigrationReport:
-    return MigrationReport(files=files)
+def build_report(files: list[FileUnit], *, dependency_provisioning: str | None = None) -> MigrationReport:
+    return MigrationReport(files=files, dependency_provisioning=dependency_provisioning)
 
 
 def _verify_summary(v: VerifyResult) -> dict:
@@ -38,6 +38,7 @@ def _file_summary_dict(f: FileUnit) -> dict:
                 "line": x.line,
                 "col": x.col,
                 "needs_llm": x.needs_llm,
+                "detail": x.detail,
             }
             for x in f.py2_findings
         ],
@@ -58,7 +59,64 @@ def _file_summary_dict(f: FileUnit) -> dict:
 
 
 def to_json(report: MigrationReport) -> str:
-    return json.dumps({"files": [_file_summary_dict(f) for f in report.files]}, indent=2)
+    return json.dumps(
+        {
+            "dependency_provisioning": report.dependency_provisioning,
+            "files": [_file_summary_dict(f) for f in report.files],
+        },
+        indent=2,
+    )
+
+
+_STATUS_COLOR = {
+    "VERIFIED": "32",  # green
+    "VERIFIED_INFERRED": "36",  # cyan - real but weaker evidence, see Status docstring
+    "NEEDS_REVIEW": "33",  # yellow
+    "FAILED": "31",  # red
+    "TRANSFORMED": "90",  # dim grey - intermediate, shouldn't normally be a terminal status
+    "PENDING": "90",
+}
+
+
+def _colorize(text: str, code: str) -> str:
+    return f"\033[{code}m{text}\033[0m"
+
+
+def to_console(report: MigrationReport, *, color: bool = True) -> str:
+    """Same information as to_text(), formatted for an interactive terminal:
+    color-coded status badges and a per-status count header up top. Kept
+    separate from to_text() (used for --report-format text and by anything
+    parsing/grepping output) so adding color/formatting here never risks
+    breaking a stable plain-text format something else might depend on."""
+    counts: dict[str, int] = {}
+    for f in report.files:
+        counts[f.status.value] = counts.get(f.status.value, 0) + 1
+
+    def badge(status: str) -> str:
+        text = f"[{status}]"
+        if not color:
+            return text
+        return _colorize(text, _STATUS_COLOR.get(status, "0"))
+
+    lines = ["ShiftCode migration report", "=" * 40]
+    for status, count in sorted(counts.items()):
+        lines.append(f"{badge(status)} {count}")
+    if report.dependency_provisioning:
+        lines.append(f"dependencies: {report.dependency_provisioning}")
+    lines.append("")
+    for f in report.files:
+        lines.append(f"{badge(f.status.value)} {f.path}")
+        if f.reason:
+            lines.append(f"    reason: {f.reason}")
+        if f.repair_attempts:
+            lines.append(f"    repair attempts: {len(f.repair_attempts)}")
+        if f.characterization_cases:
+            evidence = f.verify_result.behavior.evidence_source if f.verify_result and f.verify_result.behavior else None
+            lines.append(
+                f"    characterization tests: {len(f.characterization_cases)} case(s)"
+                + (f" (evidence: {evidence})" if evidence else "")
+            )
+    return "\n".join(lines)
 
 
 def to_text(report: MigrationReport) -> str:
@@ -69,6 +127,8 @@ def to_text(report: MigrationReport) -> str:
     lines = ["ShiftCode migration report", "=" * 40]
     for status, count in sorted(counts.items()):
         lines.append(f"{status}: {count}")
+    if report.dependency_provisioning:
+        lines.append(f"dependencies: {report.dependency_provisioning}")
     lines.append("")
     for f in report.files:
         lines.append(f"- {f.path} [{f.status.value}]")

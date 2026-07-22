@@ -17,6 +17,7 @@ from shiftcode.agents.auditor import AuditorAgent
 from shiftcode.agents.characterization import CharacterizationAgent
 from shiftcode.agents.planner import PlannerAgent
 from shiftcode.agents.refactorer import RefactorerAgent
+from shiftcode.agents.transform_auditor import TransformAuditorAgent
 from shiftcode.models import (
     MigrationPlan,
     MigrationReport,
@@ -25,6 +26,7 @@ from shiftcode.models import (
     RepairHint,
     Status,
     SymbolBlock,
+    TransformAudit,
 )
 from shiftcode.pipeline.ingest import ingest
 from shiftcode.pipeline.orchestrator import _discover_test_pairs, _process_file
@@ -122,6 +124,9 @@ def test_full_pipeline_smoke_on_fixture_with_stub_provider():
     # calc has test_info (Mode A applies), so Mode C never triggers and this
     # agent is never actually called - StubProvider([]) would raise if it were.
     characterization_agent = CharacterizationAgent(StubProvider([]))
+    # deterministic_transform doesn't corrupt anything in this fixture, so the
+    # real audit would report no concerns - stub the same empty result.
+    transform_auditor = TransformAuditorAgent(StubProvider([TransformAudit(concerns=[])]))
 
     _process_file(
         calc,
@@ -130,6 +135,7 @@ def test_full_pipeline_smoke_on_fixture_with_stub_provider():
         refactorer=refactorer,
         auditor=auditor,
         characterization_agent=characterization_agent,
+        transform_auditor=transform_auditor,
         runtimes=UNAVAILABLE_RUNTIMES,
         max_attempts=3,
         determinism_runs=3,

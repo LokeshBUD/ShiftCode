@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Callable
 
 from shiftcode.agents.auditor import AuditorAgent
 from shiftcode.agents.base import AgentOutputError
@@ -33,7 +34,6 @@ class BehaviorTestInfo:
 
     test_filename: str
     test_source: str
-    test_module_name: str
 
 
 @dataclass
@@ -45,6 +45,11 @@ class CharacterizationInfo:
 
     cases: list[TestCase] = field(default_factory=list)
     evidence_source: str = "llm_inference"
+
+
+def _emit(on_progress: Callable[[str], None] | None, msg: str) -> None:
+    if on_progress:
+        on_progress(msg)
 
 
 def verify_candidate(
@@ -72,7 +77,6 @@ def verify_candidate(
             module_source_py3=candidate_source_py3,
             test_filename=test_info.test_filename,
             test_source=test_info.test_source,
-            test_module_name=test_info.test_module_name,
             py2_runtime=py2_runtime,
             py3_runtime=py3_runtime,
         )
@@ -183,6 +187,7 @@ def migrate_file(
     determinism_runs: int = 3,
     test_info: BehaviorTestInfo | None = None,
     characterization_info: CharacterizationInfo | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> FileUnit:
     """Bounded Auditor<->Refactorer loop, wired to every verify gate. Mutates and
     returns file_unit with final_source, verify_result, status, and full
@@ -191,6 +196,7 @@ def migrate_file(
     assert file_unit.plan is not None
 
     if not file_unit.plan.steps:
+        _emit(on_progress, "verifying (no plan changes needed)")
         candidate = file_unit.deterministic_output
         result = verify_candidate(
             file_unit.original_source,
@@ -217,6 +223,7 @@ def migrate_file(
     classification = "RETRY"
 
     for attempt in range(1, max_attempts + 1):
+        _emit(on_progress, f"attempt {attempt}/{max_attempts}: refactoring")
         try:
             candidate = refactorer.refactor(
                 deterministic_source=file_unit.deterministic_output,
@@ -225,7 +232,8 @@ def migrate_file(
             )
         except AgentOutputError as exc:
             classification = "RETRY"
-            failure_detail = f"REFACTORER_OUTPUT_ERROR: {exc}"
+            failure_detail = f"REFACTORER_CALL_ERROR: {exc}"
+            _emit(on_progress, f"attempt {attempt}/{max_attempts}: Refactorer call failed, retrying")
             file_unit.repair_attempts.append(
                 RepairAttempt(
                     attempt_number=attempt,
@@ -238,6 +246,7 @@ def migrate_file(
             # Refactorer directly on the next attempt.
             continue
 
+        _emit(on_progress, f"attempt {attempt}/{max_attempts}: verifying")
         result = verify_candidate(
             file_unit.original_source,
             candidate,
@@ -251,9 +260,11 @@ def migrate_file(
         )
         classification = _classify(result)
         failure_detail = _describe_failure(result) if classification == "RETRY" else None
+        _emit(on_progress, f"attempt {attempt}/{max_attempts}: {classification}")
 
         attempt_hint_text = None
         if classification == "RETRY" and attempt < max_attempts:
+            _emit(on_progress, f"attempt {attempt}/{max_attempts}: consulting Auditor")
             try:
                 hint = auditor.diagnose(
                     deterministic_source=file_unit.deterministic_output,
@@ -264,7 +275,7 @@ def migrate_file(
                 hints.append(hint)
                 attempt_hint_text = hint.hint
             except AgentOutputError as exc:
-                failure_detail = f"{failure_detail} | AUDITOR_OUTPUT_ERROR: {exc}"
+                failure_detail = f"{failure_detail} | AUDITOR_CALL_ERROR: {exc}"
 
         file_unit.repair_attempts.append(
             RepairAttempt(

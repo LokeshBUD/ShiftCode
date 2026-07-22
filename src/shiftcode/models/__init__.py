@@ -6,6 +6,8 @@ from shiftcode.models.agent_io import (
     RepairHint,
     SymbolBlock,
     TestCase,
+    TransformAudit,
+    TransformConcern,
 )
 from shiftcode.models.file_unit import (
     CallSiteEvidence,
@@ -31,6 +33,8 @@ __all__ = [
     "SymbolBlock",
     "TestCase",
     "CharacterizationTestPlan",
+    "TransformAudit",
+    "TransformConcern",
     "CallSiteEvidence",
     "DependencySlice",
     "FileUnit",

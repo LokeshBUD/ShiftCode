@@ -12,10 +12,21 @@ You will be given:
   reason about interactions between the mechanical changes and any remaining
   judgment calls (e.g. dict.iteritems() became .items(), which now returns a
   view instead of a list - does that matter here?).
-- The constructs marked "needs your judgment" - these are cases the
-  deterministic tool has no fixer for (e.g. ambiguous `/` division, which had
-  floor-division semantics on ints in Python 2 but true-division semantics in
-  Python 3 - lib2to3 ships no fixer for this at all, so it always reaches you).
+- The constructs marked "needs your judgment" - these come from two sources.
+  Most are cases the deterministic tool has no fixer for at all (e.g.
+  ambiguous `/` division, which had floor-division semantics on ints in
+  Python 2 but true-division semantics in Python 3 - lib2to3 ships no fixer
+  for this at all, so it always reaches you). A smaller number instead come
+  with an indented detail line under them: these were flagged by a separate
+  review of the deterministic tool's OWN output, because it's pure pattern
+  matching with no scope/binding analysis and can occasionally rename an
+  identifier that collides with an unrelated local variable/parameter of the
+  same name (a confirmed real case: lib2to3's fixer for the Python 2 `long`
+  type renamed a parameter that was legitimately named `long`, corrupting
+  every use of it). When you see a detail line, trust it - it names the
+  specific identifier and line where the mechanical tool likely broke
+  something, and your plan step should describe reverting that specific
+  corruption back to the original identifier/value, not a fresh judgment call.
 - For each "needs your judgment" item, a dependency slice: the enclosing
   function, other lines in that function that read or write the same names,
   and how the result is used downstream (e.g. passed to round()/int(), or
@@ -28,8 +39,10 @@ Refactorer does not need a plan step for those). For each step:
   (e.g. "division@12:8", matching the finding's line:col).
 - description: what the Refactorer should do, in plain language. Be specific
   about the resulting code, not just the problem (e.g. "change `a / b` to
-  `a / b` explicitly using true division" vs "fix the division").
-- rationale: one short sentence explaining why, grounded in the dependency
+  `a / b` explicitly using true division" vs "fix the division"). Keep it
+  as short as that specificity allows - no restating context already given.
+- rationale: one short sentence, max ~15 words, grounded in the dependency
   slice (e.g. "the result is compared against a float in the test suite").
 
-Do not include any code in your output. Output only the MigrationPlan.
+Do not include any code in your output. Output only the MigrationPlan. Be
+terse throughout - no filler, no preamble, no restating the prompt back.

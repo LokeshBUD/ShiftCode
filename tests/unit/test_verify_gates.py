@@ -1,5 +1,6 @@
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 from shiftcode.config import LLMConfig, ShiftConfig
 from shiftcode.models import GateOutcome
@@ -8,17 +9,46 @@ from shiftcode.pipeline.verify.determinism import check_determinism
 from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime, resolve_py2_runtime
 
 
+def test_sandbox_runtime_mounts_deps_volume_and_sets_pythonpath_when_present():
+    rt = SandboxRuntime(
+        available=True, kind="docker", docker_image="shiftcode-py3-sandbox", deps_volume="shiftcode-deps-abc123"
+    )
+    cmd = rt._base_cmd(Path("/tmp/x"))
+    assert "--network" in cmd and cmd[cmd.index("--network") + 1] == "none"  # untouched by deps mounting
+    assert "shiftcode-deps-abc123:/deps:ro" in cmd
+    assert "PYTHONPATH=/deps" in cmd
+
+
+def test_sandbox_runtime_no_deps_mount_when_absent():
+    rt = SandboxRuntime(available=True, kind="docker", docker_image="shiftcode-py3-sandbox")
+    cmd = rt._base_cmd(Path("/tmp/x"))
+    assert not any("deps" in part for part in cmd)
+
+
 def _proc(stdout: str, stderr: str) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr=stderr)
 
 
+def _junit_xml(outcomes: dict[str, str]) -> str:
+    cases = []
+    for name, outcome in outcomes.items():
+        if outcome == "FAIL":
+            cases.append(f'<testcase classname="m" name="{name}"><failure message="fail">x</failure></testcase>')
+        elif outcome == "ERROR":
+            cases.append(f'<testcase classname="m" name="{name}"><error message="error">x</error></testcase>')
+        else:
+            cases.append(f'<testcase classname="m" name="{name}" />')
+    return f'<testsuites><testsuite name="pytest">{"".join(cases)}</testsuite></testsuites>'
+
+
 @dataclass
 class _FakeAvailableRuntime:
-    unittest_result: subprocess.CompletedProcess
+    pytest_result: subprocess.CompletedProcess
+    pytest_xml: str = ""
     available: bool = True
 
-    def run_unittest(self, cwd, test_module, *, timeout=30):
-        return self.unittest_result
+    def run_pytest(self, cwd, test_filename, *, timeout=30):
+        return self.pytest_result, self.pytest_xml
 
 
 def _config(**overrides) -> ShiftConfig:
@@ -68,7 +98,6 @@ def test_behavior_gate_mode_a_degrades_to_unverified_without_py2_runtime():
         module_source_py3="x = 1\n",
         test_filename="test_m.py",
         test_source="",
-        test_module_name="test_m",
         py2_runtime=unavailable,
     )
 
@@ -110,9 +139,8 @@ def test_check_determinism_flags_pre_existing_py2_flakiness_without_blocking():
     assert result.outcome == GateOutcome.PRE_EXISTING_NONDETERMINISM
 
 
-PY2_STYLE_ALL_OK = "test_add (m.T) ... ok\ntest_div (m.T) ... ok\n"
-PY3_STYLE_ALL_OK = "test_add (m.T.test_add) ... ok\ntest_div (m.T.test_div) ... ok\n"
-PY3_STYLE_DIV_FAILS = "test_add (m.T.test_add) ... ok\ntest_div (m.T.test_div) ... FAIL\n"
+ALL_OK = _junit_xml({"test_add": "ok", "test_div": "ok"})
+DIV_FAILS = _junit_xml({"test_add": "ok", "test_div": "FAIL"})
 
 
 def test_run_mode_a_passes_when_test_outcomes_match_even_if_stdout_text_differs():
@@ -122,10 +150,10 @@ def test_run_mode_a_passes_when_test_outcomes_match_even_if_stdout_text_differs(
     wording, not something any migration controls. Test outcomes matching is
     the authoritative signal; a stdout text difference alone must not fail."""
     py2_runtime = _FakeAvailableRuntime(
-        unittest_result=_proc(stdout="error: integer division or modulo by zero\n", stderr=PY2_STYLE_ALL_OK)
+        pytest_result=_proc(stdout="error: integer division or modulo by zero\n", stderr=""), pytest_xml=ALL_OK
     )
     py3_runtime = _FakeAvailableRuntime(
-        unittest_result=_proc(stdout="error: division by zero\n", stderr=PY3_STYLE_ALL_OK)
+        pytest_result=_proc(stdout="error: division by zero\n", stderr=""), pytest_xml=ALL_OK
     )
 
     result = run_mode_a(
@@ -134,7 +162,6 @@ def test_run_mode_a_passes_when_test_outcomes_match_even_if_stdout_text_differs(
         module_source_py3="x",
         test_filename="test_m.py",
         test_source="",
-        test_module_name="test_m",
         py2_runtime=py2_runtime,
         py3_runtime=py3_runtime,
     )
@@ -144,8 +171,8 @@ def test_run_mode_a_passes_when_test_outcomes_match_even_if_stdout_text_differs(
 
 
 def test_run_mode_a_fails_when_test_outcomes_genuinely_differ():
-    py2_runtime = _FakeAvailableRuntime(unittest_result=_proc(stdout="", stderr=PY2_STYLE_ALL_OK))
-    py3_runtime = _FakeAvailableRuntime(unittest_result=_proc(stdout="", stderr=PY3_STYLE_DIV_FAILS))
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml=ALL_OK)
+    py3_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml=DIV_FAILS)
 
     result = run_mode_a(
         module_filename="m.py",
@@ -153,10 +180,34 @@ def test_run_mode_a_fails_when_test_outcomes_genuinely_differ():
         module_source_py3="x",
         test_filename="test_m.py",
         test_source="",
-        test_module_name="test_m",
         py2_runtime=py2_runtime,
         py3_runtime=py3_runtime,
     )
 
     assert result.outcome == GateOutcome.FAIL
     assert "test_div" in result.failing_tests[0]
+
+
+def test_run_mode_a_does_not_vacuously_pass_when_zero_tests_discovered():
+    """Regression from a real stress test: test_docopt.py uses bare pytest-style
+    `assert` functions - an earlier `unittest`-based runner found zero tests on
+    both sides. Empty stdout trivially matched empty stdout and the (empty)
+    outcome-mismatch set was empty, so this used to report PASS ("all tests
+    match") despite nothing having actually run - and a real, crash-inducing
+    bug (lib2to3's fix_long corrupting a shadowed identifier) reached VERIFIED
+    status undetected as a direct result."""
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml="")
+    py3_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="", stderr=""), pytest_xml="")
+
+    result = run_mode_a(
+        module_filename="m.py",
+        module_source_py2="x",
+        module_source_py3="x",
+        test_filename="test_m.py",
+        test_source="",
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+    )
+
+    assert result.outcome == GateOutcome.UNVERIFIED
+    assert "0 tests" in result.detail

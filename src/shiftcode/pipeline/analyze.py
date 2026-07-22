@@ -3,6 +3,7 @@ import ast
 from shiftcode.models import DependencySlice, Py2Finding
 from shiftcode.pipeline.transform.deterministic import make_refactoring_tool
 from shiftcode.vendor.lib2to3 import pygram
+from shiftcode.vendor.lib2to3.fixes.fix_types import _TYPE_MAPPING
 from shiftcode.vendor.lib2to3.refactor import _detect_future_features
 
 
@@ -111,7 +112,94 @@ def find_semantic_findings(
         )
         slices.append(_build_dependency_slice(enclosing_scope(node), node))
 
+    findings.extend(_find_legacy_types_from_imports(tree))
+    findings.extend(_find_normalize_encode_chains(tree))
+
     return findings, slices
+
+
+def _find_normalize_encode_chains(tree: ast.Module) -> list[Py2Finding]:
+    """`unicodedata.normalize(...).encode(encoding, errors)` is a common py2
+    idiom for stripping accents/non-ASCII characters - it returned `str` in
+    Python 2, but `.encode(...)` always returns `bytes` in Python 3, and
+    lib2to3 has no fixer for this since it's a real behavior change, not a
+    syntax one. Confirmed via two independent real stress tests (docs/bug-log.md
+    #8 - python-slugify's `slugify()` and inflection's `transliterate()`, same
+    exact line shape in both) that the resulting bytes value then gets passed
+    to further str-only operations (re.sub, .lower(), string formatting) and
+    raises TypeError at runtime. Narrowly scoped to this specific chain shape
+    rather than every `.encode()` call in general, since that's exactly what's
+    been confirmed to actually happen - not a guess at a broader pattern."""
+    findings: list[Py2Finding] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "encode"
+            and isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Attribute)
+            and node.func.value.func.attr == "normalize"
+        ):
+            continue
+        findings.append(
+            Py2Finding(
+                construct_name="normalize_encode_bytes_result",
+                line=node.lineno,
+                col=node.col_offset,
+                fixer_name=None,
+                needs_llm=True,
+                detail=(
+                    "'unicodedata.normalize(...).encode(...)' returns bytes in Python 3 "
+                    "(it returned str in Python 2). If this value is used afterward in "
+                    "string operations (re.sub, .lower(), string formatting, concatenation "
+                    "with a str), that will raise TypeError. Check how the result is used "
+                    "downstream in this function; if it feeds further string operations, "
+                    "decode it back to str immediately (e.g. append '.decode(\"ascii\")' after "
+                    "'.encode(...)')."
+                ),
+            )
+        )
+    return findings
+
+
+def _find_legacy_types_from_imports(tree: ast.Module) -> list[Py2Finding]:
+    """lib2to3's fix_types (vendored, real upstream CPython code) only
+    rewrites the `types.X` attribute-access form - confirmed via a real
+    stress test (docs/bug-log.md #7) that its PATTERN never matches a bare
+    name from `from types import UnicodeType`, and by the fixer's own
+    documented design it never touches the import statement either. Left
+    alone, that import raises ImportError under Python 3 (`types.UnicodeType`
+    etc. don't exist there), and since this construct produces zero findings
+    on its own, the file gets zero LLM/repair engagement at all (whatever
+    other findings exist may also be absent, routing it into the
+    zero-plan-steps fast path). Reusing fix_types' own mapping keeps "what's
+    the Python 3 equivalent" defined in exactly one place."""
+    findings: list[Py2Finding] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ImportFrom) and node.module == "types"):
+            continue
+        for alias in node.names:
+            replacement = _TYPE_MAPPING.get(alias.name)
+            if replacement is None:
+                continue
+            findings.append(
+                Py2Finding(
+                    construct_name="legacy_types_import",
+                    line=node.lineno,
+                    col=node.col_offset,
+                    fixer_name=None,
+                    needs_llm=True,
+                    detail=(
+                        f"'from types import {alias.name}' has no Python 3 equivalent "
+                        f"(types.{alias.name} was removed) - lib2to3 only rewrites the "
+                        f"'types.{alias.name}' attribute form, never bare names imported "
+                        f"this way, and never touches the import statement itself. Remove "
+                        f"this import and replace every bare use of "
+                        f"'{alias.asname or alias.name}' in this file with '{replacement}'."
+                    ),
+                )
+            )
+    return findings
 
 
 def _names_in(node: ast.AST) -> set[str]:
