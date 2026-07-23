@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="target number of auto-generated Mode C fuzz cases per function (0/unset = off, use LLM-picked examples)",
     )
+    migrate.add_argument(
+        "--capture-repair-history",
+        action="store_true",
+        default=None,
+        help="append every diagnosed repair to repair_history_path, for later use by `suggest-fixer-rules`",
+    )
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--in-place", action="store_true")
     migrate.add_argument("--strict", action="store_true")
@@ -42,6 +48,16 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument(
         "--quiet", "-q", action="store_true", help="suppress live per-file progress output during the run"
     )
+
+    suggest = sub.add_parser(
+        "suggest-fixer-rules",
+        help="draft candidate permanent fixer detectors from confirmed repairs (see --capture-repair-history)",
+    )
+    suggest.add_argument("--history", type=Path, default=None, help="defaults to config's repair_history_path")
+    suggest.add_argument("--out", type=Path, default=Path("candidate_fixers"))
+    suggest.add_argument("--model", default=None)
+    suggest.add_argument("--base-url", default=None)
+
     return parser
 
 
@@ -101,11 +117,73 @@ def _run_dry_run(path: Path) -> int:
     return 0
 
 
+def _write_draft_fixer(rule, entry, out_dir: Path) -> Path:
+    """Never exec()'d - a candidate .py file for a human to read like a PR.
+    A draft that doesn't even parse still gets written (never silently
+    dropped - same "be honest about degraded output" posture as everywhere
+    else in this pipeline), just flagged loudly in the header instead."""
+    import ast
+
+    parse_warning = ""
+    try:
+        ast.parse(rule.draft_detector_code)
+    except SyntaxError as exc:
+        parse_warning = f"\n# WARNING: draft did not parse, needs manual rewrite: {exc}"
+
+    header = (
+        "# Candidate fixer, drafted by FixerRuleAgent - REVIEW BEFORE USE.\n"
+        "# Never wired into the pipeline automatically. See docs/bug-log.md for\n"
+        "# the graduation process: review, test, then hand-add to analyze.py.\n"
+        f"# source repair: {entry.file_path}\n"
+        f"# trigger: {rule.trigger_description}\n"
+        f"# fix: {rule.fix_description}\n"
+        f"# safety_conditions: {rule.safety_conditions}\n"
+        f"# confidence: {rule.confidence}"
+        f"{parse_warning}\n\n"
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / f"{rule.pattern_name}.py"
+    target.write_text(header + rule.draft_detector_code)
+    return target
+
+
+def _run_suggest_fixer_rules(args: argparse.Namespace) -> int:
+    from shiftcode.agents.base import AgentOutputError
+    from shiftcode.agents.fixer_rule import FixerRuleAgent
+    from shiftcode.llm import get_provider
+    from shiftcode.pipeline.repair_history import load_repair_history
+
+    config = load_config(cli_base_url=args.base_url, cli_model=args.model)
+    history_path = args.history or Path(config.repair_history_path)
+    entries = load_repair_history(history_path)
+    if not entries:
+        print(f"no repair history found at {history_path} - nothing to suggest")
+        return 0
+
+    agent = FixerRuleAgent(get_provider(config.llm_for("fixer_rule"), name="fixer_rule"))
+    written = []
+    for entry in entries:
+        try:
+            rule = agent.propose_rule(entry=entry)
+        except AgentOutputError as exc:
+            print(f"{entry.file_path}: skipped, could not draft a rule ({exc})")
+            continue
+        target = _write_draft_fixer(rule, entry, args.out)
+        written.append(target)
+        print(f"{entry.file_path}: drafted {target}")
+
+    print(f"\n{len(written)}/{len(entries)} candidate fixer(s) written to {args.out} - review before use.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()  # loads .env from cwd (or nearest parent) into os.environ, if present
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "suggest-fixer-rules":
+        return _run_suggest_fixer_rules(args)
 
     if args.command != "migrate":
         parser.print_help()
@@ -123,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         cli_max_repair_attempts=args.max_repair_attempts,
         cli_determinism_runs=args.determinism_runs,
         cli_characterization_fuzz_cases=args.characterization_fuzz_cases,
+        cli_capture_repair_history=args.capture_repair_history,
     )
     if args.no_install_deps:
         config = replace(config, install_project_dependencies=False)

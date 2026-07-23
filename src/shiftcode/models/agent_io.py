@@ -79,6 +79,35 @@ class CharacterizationFuzzPlan(BaseModel):
     function_seed_plans: list[FunctionSeedPlan]
 
 
+class GeneralizedFixRule(BaseModel):
+    """A candidate permanent detector, drafted from ONE confirmed real repair
+    (see pipeline/repair_history.py). This is a DRAFT for human review, never
+    executed automatically anywhere in the pipeline - draft_detector_code is
+    plain text a human reads/edits/tests before it's ever real code, same
+    posture RefactorPatch.blocks[].new_source has, except that one is
+    verified by the sandbox before being trusted and this one deliberately
+    isn't (see docs/bug-log.md and the flash-lite feasibility test this
+    schema is based on: reliably good at generalizing a rule, not reliably
+    faithful at applying one un-reviewed)."""
+
+    pattern_name: str
+    trigger_description: str
+    fix_description: str
+    # Conditions that must hold, or cases to explicitly exclude, before this
+    # pattern is safe to detect broadly - e.g. "identifier must be a genuine
+    # local binding, not the builtin usage" for a shadowing-style pattern.
+    safety_conditions: list[str]
+    # 0-1: the model's own confidence this generalizes safely to code it
+    # hasn't seen - informational only, never used to auto-decide anything;
+    # the human reviewer makes that call regardless of this number.
+    confidence: float
+    # A starting-point ast.walk detector function body, in the real style of
+    # analyze.py's existing hand-written detectors (_find_normalize_encode_chains,
+    # _find_legacy_types_from_imports) - a draft for a human to edit and test,
+    # not something ever exec()'d by the pipeline.
+    draft_detector_code: str
+
+
 class TransformConcern(BaseModel):
     identifier: str
     line: int

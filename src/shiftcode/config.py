@@ -3,7 +3,7 @@ import tomllib
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-AGENT_ROLES = ("planner", "refactorer", "auditor", "characterization", "transform_auditor")
+AGENT_ROLES = ("planner", "refactorer", "auditor", "characterization", "transform_auditor", "fixer_rule")
 
 
 @dataclass
@@ -47,6 +47,13 @@ class ShiftConfig:
     # MAX_GENERATED_CASES_HARD_CAP for the absolute ceiling regardless of
     # this value.
     characterization_fuzz_cases: int = 0
+    # Off by default (opt-in): when True, run_migration appends every file
+    # that reached VERIFIED/VERIFIED_INFERRED with a real Auditor-diagnosed
+    # repair to repair_history_path (pipeline/repair_history.py) - the raw
+    # material `suggest-fixer-rules` later drafts candidate permanent
+    # detectors from. Pure serialization, zero LLM/Docker cost either way.
+    capture_repair_history: bool = False
+    repair_history_path: str = ".shiftcode/repair_history.jsonl"
 
     def llm_for(self, role: str) -> LLMConfig:
         return self.agent_overrides.get(role, self.llm)
@@ -112,6 +119,7 @@ def load_config(
     cli_max_repair_attempts: int | None = None,
     cli_determinism_runs: int | None = None,
     cli_characterization_fuzz_cases: int | None = None,
+    cli_capture_repair_history: bool | None = None,
 ) -> ShiftConfig:
     """Resolve config with precedence: CLI args > env vars > pyproject.toml [tool.shiftcode] > defaults."""
     table = _load_pyproject_table(project_root)
@@ -149,6 +157,12 @@ def load_config(
         if cli_characterization_fuzz_cases is not None
         else table.get("characterization_fuzz_cases", 0)
     )
+    capture_repair_history = (
+        cli_capture_repair_history
+        if cli_capture_repair_history is not None
+        else table.get("capture_repair_history", False)
+    )
+    repair_history_path = table.get("repair_history_path", ".shiftcode/repair_history.jsonl")
 
     return ShiftConfig(
         llm=llm,
@@ -163,4 +177,6 @@ def load_config(
         determinism_runs=determinism_runs,
         max_dependency_closure_files=max_dependency_closure_files,
         characterization_fuzz_cases=characterization_fuzz_cases,
+        capture_repair_history=capture_repair_history,
+        repair_history_path=repair_history_path,
     )

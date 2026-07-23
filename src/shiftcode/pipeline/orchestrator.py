@@ -23,6 +23,7 @@ from shiftcode.pipeline.dependencies import (
 )
 from shiftcode.pipeline.ingest import ingest
 from shiftcode.pipeline.repair import BehaviorTestInfo, CharacterizationInfo, is_test_filename, migrate_file
+from shiftcode.pipeline.repair_history import append_repair_history, qualifying_repair
 from shiftcode.pipeline.report import build_report
 from shiftcode.pipeline.transform.deterministic import (
     DeterministicTransformError,
@@ -545,6 +546,10 @@ def run_migration(
             except Exception as exc:
                 file_unit.status = Status.NEEDS_REVIEW
                 file_unit.reason = f"unexpected error while processing this file: {exc}"
+
+        if config.capture_repair_history:
+            history_entries = [e for fu in file_units if (e := qualifying_repair(fu)) is not None]
+            append_repair_history(history_entries, Path(config.repair_history_path))
     finally:
         # Volumes are ephemeral scaffolding for this one run, not something
         # that should accumulate on the Docker host across migrations.
