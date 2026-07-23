@@ -39,6 +39,14 @@ class ShiftConfig:
     # beyond this; a file whose closure exceeds it degrades to UNVERIFIED
     # with a clear reason instead.
     max_dependency_closure_files: int = 20
+    # Off by default (opt-in): 0 means Mode C keeps using today's LLM-picked
+    # single-example CharacterizationTestPlan path unchanged. A positive
+    # value switches to the differential-fuzzing seed-pool path instead
+    # (propose_fuzz_seeds + expand_function_seeds), targeting roughly this
+    # many executed cases per function - see fuzz_generation.py's own
+    # MAX_GENERATED_CASES_HARD_CAP for the absolute ceiling regardless of
+    # this value.
+    characterization_fuzz_cases: int = 0
 
     def llm_for(self, role: str) -> LLMConfig:
         return self.agent_overrides.get(role, self.llm)
@@ -103,6 +111,7 @@ def load_config(
     cli_py2_interpreter: str | None = None,
     cli_max_repair_attempts: int | None = None,
     cli_determinism_runs: int | None = None,
+    cli_characterization_fuzz_cases: int | None = None,
 ) -> ShiftConfig:
     """Resolve config with precedence: CLI args > env vars > pyproject.toml [tool.shiftcode] > defaults."""
     table = _load_pyproject_table(project_root)
@@ -135,6 +144,11 @@ def load_config(
     max_repair_attempts = cli_max_repair_attempts or table.get("max_repair_attempts", 3)
     determinism_runs = cli_determinism_runs or table.get("determinism_runs", 3)
     max_dependency_closure_files = table.get("max_dependency_closure_files", 20)
+    characterization_fuzz_cases = (
+        cli_characterization_fuzz_cases
+        if cli_characterization_fuzz_cases is not None
+        else table.get("characterization_fuzz_cases", 0)
+    )
 
     return ShiftConfig(
         llm=llm,
@@ -148,4 +162,5 @@ def load_config(
         max_repair_attempts=max_repair_attempts,
         determinism_runs=determinism_runs,
         max_dependency_closure_files=max_dependency_closure_files,
+        characterization_fuzz_cases=characterization_fuzz_cases,
     )

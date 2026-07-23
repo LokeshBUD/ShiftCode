@@ -2,9 +2,10 @@ from dataclasses import dataclass
 
 from shiftcode.agents.base import call_structured, load_prompt, render_prompt
 from shiftcode.llm.base import LLMProvider
-from shiftcode.models import CallSiteEvidence, CharacterizationTestPlan
+from shiftcode.models import CallSiteEvidence, CharacterizationFuzzPlan, CharacterizationTestPlan
 
 _STATIC_PROMPT = load_prompt("characterization")
+_STATIC_FUZZ_PROMPT = load_prompt("characterization_fuzz")
 
 
 @dataclass
@@ -50,5 +51,19 @@ class CharacterizationAgent:
             self.provider,
             prompt=prompt,
             schema=CharacterizationTestPlan,
+            max_retries=self.max_retries,
+        )
+
+    def propose_fuzz_seeds(self, *, functions: list[FunctionContext]) -> CharacterizationFuzzPlan:
+        """Same one-call-per-file structure as propose_tests - the LLM
+        proposes a per-parameter seed pool (not full case counts), so this
+        call's cost doesn't scale with characterization_fuzz_cases at all;
+        expand_function_seeds (fuzz_generation.py) does the actual case
+        generation deterministically, with zero further LLM calls."""
+        prompt = render_prompt(_STATIC_FUZZ_PROMPT, _render_dynamic(functions))
+        return call_structured(
+            self.provider,
+            prompt=prompt,
+            schema=CharacterizationFuzzPlan,
             max_retries=self.max_retries,
         )

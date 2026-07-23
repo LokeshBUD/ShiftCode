@@ -46,6 +46,39 @@ class CharacterizationTestPlan(BaseModel):
     cases: list[TestCase]
 
 
+class ParamSeed(BaseModel):
+    # Position of this parameter (0-indexed) in the function's positional
+    # argument list - ties the seed pool back to a specific slot so
+    # fuzz_generation.py's combinatorial expansion knows which pool feeds
+    # which position of a generated args_literal tuple.
+    param_index: int
+    # A Python literal-expression STRING per candidate value - same
+    # literal-only contract as TestCase.args_literal, but each entry here is
+    # a single VALUE, not a full argument tuple (e.g. for an int parameter:
+    # ["0", "1", "-1", "1000000"]; for a string parameter: ['""', "'hello'",
+    # "'a' * 1000"]). Parsed with ast.literal_eval ONLY, never eval()/exec() -
+    # same defense as args_literal, applied per-value instead of per-tuple.
+    seed_values_literal: list[str]
+    rationale: str
+
+
+class FunctionSeedPlan(BaseModel):
+    function_name: str
+    param_seeds: list[ParamSeed]
+    # A small number of hand-picked FULL argument tuples (same args_literal
+    # contract as TestCase) for specific correlated combinations worth
+    # pinning verbatim - e.g. a real call-site-observed combination that
+    # independent per-parameter expansion of param_seeds couldn't
+    # reconstruct on its own. Capped at 3 by both the prompt and
+    # fuzz_generation.py (code-level enforcement, not just prompt trust -
+    # same posture as args_literal's own ast.literal_eval gate).
+    anchor_cases: list[TestCase] = []
+
+
+class CharacterizationFuzzPlan(BaseModel):
+    function_seed_plans: list[FunctionSeedPlan]
+
+
 class TransformConcern(BaseModel):
     identifier: str
     line: int

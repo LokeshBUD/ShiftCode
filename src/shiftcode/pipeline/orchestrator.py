@@ -34,6 +34,7 @@ from shiftcode.pipeline.verify.dependency_provisioning import (
     find_requirements_file,
     provision_dependencies,
 )
+from shiftcode.pipeline.verify.fuzz_generation import expand_function_seeds
 from shiftcode.pipeline.verify.sandbox_runtime import ExecutionRuntimes, resolve_execution_runtimes
 
 
@@ -151,10 +152,20 @@ def _build_characterization_info(
     file_unit: FileUnit,
     all_file_units: list[FileUnit],
     characterization_agent: CharacterizationAgent,
+    *,
+    characterization_fuzz_cases: int = 0,
 ) -> CharacterizationInfo | None:
     """Runs once per file, before the repair loop (unlike Mode A's test_info,
     this requires LLM calls, so it's generated upfront and reused across
-    repair attempts rather than regenerated per attempt)."""
+    repair attempts rather than regenerated per attempt).
+
+    characterization_fuzz_cases == 0 (default) keeps today's path unchanged:
+    the LLM proposes 2-5 full example cases directly (propose_tests). A
+    positive value switches to the differential-fuzzing path instead: the
+    LLM proposes a per-parameter seed pool per function (propose_fuzz_seeds,
+    one call total either way), and expand_function_seeds - pure, local,
+    zero further LLM calls - deterministically expands that into up to
+    characterization_fuzz_cases concrete TestCases per function."""
     functions = top_level_function_defs(file_unit.original_source)
     if not functions:
         return None
@@ -183,6 +194,22 @@ def _build_characterization_info(
             )
         )
 
+    evidence_source = "+".join(sorted(tiers_used))
+
+    if characterization_fuzz_cases > 0:
+        try:
+            fuzz_plan = characterization_agent.propose_fuzz_seeds(functions=contexts)
+        except AgentOutputError:
+            return None  # this file just doesn't get characterization-tested
+        cases = [
+            case
+            for seed_plan in fuzz_plan.function_seed_plans
+            for case in expand_function_seeds(seed_plan, case_budget=characterization_fuzz_cases)
+        ]
+        if not cases:
+            return None
+        return CharacterizationInfo(cases=cases, evidence_source=evidence_source)
+
     try:
         # One call for every function in this file, not one call per function
         # - see FunctionContext's docstring for why.
@@ -192,7 +219,7 @@ def _build_characterization_info(
 
     if not plan.cases:
         return None
-    return CharacterizationInfo(cases=plan.cases, evidence_source="+".join(sorted(tiers_used)))
+    return CharacterizationInfo(cases=plan.cases, evidence_source=evidence_source)
 
 
 def _process_file_phase_a(
@@ -204,6 +231,7 @@ def _process_file_phase_a(
     transform_auditor: TransformAuditorAgent,
     runtimes: ExecutionRuntimes,
     test_info: BehaviorTestInfo | None,
+    characterization_fuzz_cases: int = 0,
     on_progress: Callable[[str], None] | None = None,
 ) -> CharacterizationInfo | None:
     """Deterministic transform, findings, transform-audit, Planner, Mode C
@@ -280,7 +308,10 @@ def _process_file_phase_a(
     ):
         _emit(on_progress, file_unit, "generating characterization tests")
         characterization_info = _build_characterization_info(
-            file_unit, all_file_units, characterization_agent
+            file_unit,
+            all_file_units,
+            characterization_agent,
+            characterization_fuzz_cases=characterization_fuzz_cases,
         )
         if characterization_info is not None:
             file_unit.characterization_cases = characterization_info.cases
@@ -337,6 +368,7 @@ def _process_file(
     max_attempts: int,
     determinism_runs: int,
     test_info: BehaviorTestInfo | None,
+    characterization_fuzz_cases: int = 0,
     on_progress: Callable[[str], None] | None = None,
 ) -> None:
     """Thin single-file convenience wrapper (Phase A then Phase B for one
@@ -351,6 +383,7 @@ def _process_file(
         transform_auditor=transform_auditor,
         runtimes=runtimes,
         test_info=test_info,
+        characterization_fuzz_cases=characterization_fuzz_cases,
         on_progress=on_progress,
     )
     if file_unit.status == Status.NEEDS_REVIEW:
@@ -459,6 +492,7 @@ def run_migration(
                     transform_auditor=transform_auditor,
                     runtimes=runtimes,
                     test_info=test_pairs.get(file_unit.path),
+                    characterization_fuzz_cases=config.characterization_fuzz_cases,
                     on_progress=on_progress,
                 )
                 if info is not None:

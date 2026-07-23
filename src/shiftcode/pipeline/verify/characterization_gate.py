@@ -4,30 +4,20 @@ from pathlib import Path
 
 from shiftcode.models import BehaviorResult, GateOutcome, TestCase
 from shiftcode.pipeline.dependencies import ClosureFile
+from shiftcode.pipeline.verify.fuzz_generation import (
+    UnsafeTestCaseError,
+    _neighbor_variants,
+    validate_args_literal,
+)
 from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime, write_sandbox_tree
 
-
-class UnsafeTestCaseError(Exception):
-    """args_literal failed the literal-only safety check - rejected before any
-    driver script is ever built or executed. Not expected in normal operation
-    (the prompt instructs literal-only output and the schema is validated),
-    but this is the actual enforcement point, not the prompt wording."""
-
-
-def _validate_args_literal(args_literal: str) -> tuple:
-    """The only thing standing between 'the LLM proposed an input' and 'code
-    executes' - ast.literal_eval structurally cannot evaluate a function call,
-    attribute access, or name lookup. Anything that isn't a pure literal tuple
-    is rejected here, full stop."""
-    try:
-        value = ast.literal_eval(args_literal)
-    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
-        raise UnsafeTestCaseError(f"args_literal {args_literal!r} rejected: {exc}") from exc
-    if not isinstance(value, tuple):
-        raise UnsafeTestCaseError(
-            f"args_literal {args_literal!r} must be a tuple literal, got {type(value).__name__}"
-        )
-    return value
+# Free-text detail formatting cap - failing_tests (structured, for
+# programmatic consumption) stays fully uncapped regardless; this only
+# bounds the human-readable summary string, which becomes unreadable once
+# case counts grow past a handful (a real concern once characterization_fuzz_cases
+# raises typical case counts from single digits into the dozens/hundreds).
+MAX_REPORTED_MISMATCHES = 10
+_NEIGHBOR_VARIANT_COUNT = 3
 
 
 def _values_equal(py2_val: str, py3_val: str) -> bool:
@@ -50,7 +40,7 @@ def _values_equal(py2_val: str, py3_val: str) -> bool:
 def _build_driver_script(module_name: str, case: TestCase) -> str:
     """Valid under both py2 and py3 (print(x) as a single parenthesized arg
     works identically as a statement in py2 and a call in py3). args_literal
-    has already passed _validate_args_literal - its exact source text is
+    has already passed validate_args_literal - its exact source text is
     proven to be nothing but a literal tuple, so splicing it directly into
     the driver as source code is exactly as safe as writing "(10, 4)" by
     hand; no eval() of any kind happens at driver runtime."""
@@ -101,13 +91,14 @@ def run_mode_c(
     The module + its dependency closure are written into each side's sandbox
     ONCE, reused across every test case (only the tiny driver script changes
     per case) - with a real closure this is meaningfully cheaper than the old
-    fresh-temp-dir-per-case approach. Trade-off worth naming explicitly: this
-    reintroduces a small cross-case isolation risk (a case with a real
-    filesystem side effect could in principle leak into the next case's
-    shared directory) - acceptable given Mode C is already scoped to
-    top-level functions with literal-only arguments (see
-    top_level_function_defs's own docstring), not arbitrary stateful
-    objects."""
+    fresh-temp-dir-per-case approach, and matters even more once
+    characterization_fuzz_cases raises typical case counts well past single
+    digits. Trade-off worth naming explicitly: this reintroduces a small
+    cross-case isolation risk (a case with a real filesystem side effect
+    could in principle leak into the next case's shared directory) -
+    acceptable given Mode C is already scoped to top-level functions with
+    literal-only arguments (see top_level_function_defs's own docstring),
+    not arbitrary stateful objects."""
     if not py2_runtime.available:
         return BehaviorResult(
             outcome=GateOutcome.UNVERIFIED, mode="C", detail=f"no py2 sandbox available ({py2_runtime.reason})"
@@ -125,7 +116,7 @@ def run_mode_c(
     rejected = []
     for case in test_plan_cases:
         try:
-            _validate_args_literal(case.args_literal)
+            validate_args_literal(case.args_literal)
             valid_cases.append(case)
         except UnsafeTestCaseError as exc:
             rejected.append(f"{case.function_name}{case.args_literal}: {exc}")
@@ -138,18 +129,24 @@ def run_mode_c(
 
     mismatches = []
     failing_cases = []
+    first_failure_args: tuple | None = None
     with tempfile.TemporaryDirectory() as py2_dir, tempfile.TemporaryDirectory() as py3_dir:
         write_sandbox_tree(Path(py2_dir), rel_path, module_source_py2, closure, side="py2")
         write_sandbox_tree(Path(py3_dir), rel_path, module_source_py3, closure, side="py3")
 
-        for case in valid_cases:
+        cases_to_run = list(valid_cases)
+        i = 0
+        while i < len(cases_to_run):
+            case = cases_to_run[i]
+            i += 1
             py2_out = _run_case_in(py2_runtime, Path(py2_dir), module_name, case, timeout)
             py3_out = _run_case_in(py3_runtime, Path(py3_dir), module_name, case, timeout)
 
             py2_kind, _, py2_val = py2_out.partition(":")
             py3_kind, _, py3_val = py3_out.partition(":")
-            case_label = f"{case.function_name}{case.args_literal}"
+            case_label = f"{case.function_name}{case.args_literal} {case.rationale}"
 
+            is_mismatch = False
             # Same lesson as Mode A (behavior_gate.py): compare the meaningful
             # signal, not incidental interpreter text. Whether it raised, and
             # what type, or what value it returned, IS the signal. An exception's
@@ -157,19 +154,46 @@ def run_mode_c(
             # error (e.g. ZeroDivisionError) - that's not compared here.
             if py2_kind != py3_kind:
                 mismatches.append(f"{case_label}: py2={py2_out!r} py3={py3_out!r}")
-                failing_cases.append(case_label)
+                is_mismatch = True
             elif py2_kind == "RESULT" and not _values_equal(py2_val, py3_val):
                 mismatches.append(f"{case_label}: py2 returned {py2_val!r}, py3 returned {py3_val!r}")
-                failing_cases.append(case_label)
+                is_mismatch = True
             elif py2_kind == "EXCEPTION" and py2_val != py3_val:
                 mismatches.append(f"{case_label}: py2 raised {py2_val}, py3 raised {py3_val}")
+                is_mismatch = True
+
+            if is_mismatch:
                 failing_cases.append(case_label)
+                # Cheap, non-library shrinking analog: once the FIRST failure
+                # for this whole run is found, probe a small, fixed number of
+                # boundary-nudged neighbors of it (does the failure narrow to
+                # a boundary, or hold broadly?) - scoped to exactly one origin
+                # case, not every failure, to keep the added cost bounded and
+                # predictable (+_NEIGHBOR_VARIANT_COUNT total, not per-failure).
+                # Deliberately NOT stopping the main loop on failure - running
+                # the full case budget even after a mismatch preserves real
+                # diagnostic signal (boundary-specific vs pervasive) the
+                # all-cases-run design already gives.
+                if first_failure_args is None:
+                    try:
+                        first_failure_args = validate_args_literal(case.args_literal)
+                        cases_to_run.extend(
+                            _neighbor_variants(
+                                first_failure_args, function_name=case.function_name, count=_NEIGHBOR_VARIANT_COUNT
+                            )
+                        )
+                    except UnsafeTestCaseError:
+                        pass
 
     if mismatches:
+        reported = mismatches[:MAX_REPORTED_MISMATCHES]
+        detail_parts = [f"characterization test mismatches (evidence: {evidence_source}): " + "; ".join(reported)]
+        if len(mismatches) > MAX_REPORTED_MISMATCHES:
+            detail_parts.append(f"...and {len(mismatches) - MAX_REPORTED_MISMATCHES} more mismatch(es)")
         return BehaviorResult(
             outcome=GateOutcome.FAIL,
             mode="C",
-            detail=f"characterization test mismatches (evidence: {evidence_source}): " + "; ".join(mismatches),
+            detail=" ".join(detail_parts),
             failing_tests=failing_cases,
             evidence_source=evidence_source,
         )

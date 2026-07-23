@@ -25,6 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
     migrate.add_argument("--py2-interpreter", default=None)
     migrate.add_argument("--max-repair-attempts", type=int, default=None)
     migrate.add_argument("--determinism-runs", type=int, default=None)
+    migrate.add_argument(
+        "--characterization-fuzz-cases",
+        type=int,
+        default=None,
+        help="target number of auto-generated Mode C fuzz cases per function (0/unset = off, use LLM-picked examples)",
+    )
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--in-place", action="store_true")
     migrate.add_argument("--strict", action="store_true")
@@ -116,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         cli_py2_interpreter=args.py2_interpreter,
         cli_max_repair_attempts=args.max_repair_attempts,
         cli_determinism_runs=args.determinism_runs,
+        cli_characterization_fuzz_cases=args.characterization_fuzz_cases,
     )
     if args.no_install_deps:
         config = replace(config, install_project_dependencies=False)

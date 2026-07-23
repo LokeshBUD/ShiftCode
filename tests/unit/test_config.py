@@ -5,6 +5,7 @@ def test_defaults(tmp_path):
     cfg = load_config(project_root=tmp_path)
     assert cfg.llm.model == "gpt-4o-mini"
     assert cfg.llm.base_url is None
+    assert cfg.characterization_fuzz_cases == 0  # off by default - additive/opt-in feature
 
 
 def test_env_overrides_defaults(monkeypatch, tmp_path):
@@ -52,3 +53,25 @@ base_url = "http://cheap:8000/v1"
     assert cfg.llm_for("auditor") is cfg.llm  # no override configured, falls through
     assert cfg.py2_interpreter == "/usr/bin/python2"
     assert cfg.max_repair_attempts == 5
+
+
+def test_characterization_fuzz_cases_from_pyproject(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[tool.shiftcode]
+characterization_fuzz_cases = 50
+"""
+    )
+    cfg = load_config(project_root=tmp_path)
+    assert cfg.characterization_fuzz_cases == 50
+
+
+def test_characterization_fuzz_cases_cli_overrides_pyproject(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[tool.shiftcode]
+characterization_fuzz_cases = 50
+"""
+    )
+    cfg = load_config(project_root=tmp_path, cli_characterization_fuzz_cases=0)
+    assert cfg.characterization_fuzz_cases == 0  # explicit CLI 0 must not fall back to the pyproject value

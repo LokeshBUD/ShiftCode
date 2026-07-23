@@ -7,41 +7,14 @@ import pytest
 from shiftcode.models import GateOutcome, TestCase
 from shiftcode.pipeline.dependencies import ClosureFile
 from shiftcode.pipeline.verify.characterization_gate import (
-    UnsafeTestCaseError,
+    MAX_REPORTED_MISMATCHES,
     _module_dotted_name,
-    _validate_args_literal,
     run_mode_c,
 )
 
-
-@pytest.mark.parametrize(
-    "malicious",
-    [
-        '__import__("os").system("echo pwned")',
-        'open("/etc/passwd").read()',
-        "(a=5, b=0)",
-        'os.system("rm -rf /")',
-        "lambda: None",
-        "some_name",
-    ],
-)
-def test_validate_args_literal_rejects_non_literal_expressions(malicious):
-    """The entire defense against a malicious/manipulated model response
-    trying to smuggle code execution through this field. Must reject
-    anything that isn't a pure literal tuple - no exceptions."""
-    with pytest.raises(UnsafeTestCaseError):
-        _validate_args_literal(malicious)
-
-
-def test_validate_args_literal_accepts_literal_tuples():
-    assert _validate_args_literal("(10, 4)") == (10, 4)
-    assert _validate_args_literal("()") == ()
-    assert _validate_args_literal("([1, 2], {'a': 1})") == ([1, 2], {"a": 1})
-
-
-def test_validate_args_literal_rejects_non_tuple_literal():
-    with pytest.raises(UnsafeTestCaseError):
-        _validate_args_literal("5")  # a literal, but not a tuple
+# UnsafeTestCaseError / validate_args_literal moved to fuzz_generation.py
+# (shared by both the single-example and fuzz characterization paths now -
+# see test_fuzz_generation.py for their tests).
 
 
 @dataclass
@@ -60,7 +33,12 @@ class _ScriptedRuntime:
 
     def run_script(self, cwd, script_rel_path, *, timeout=30):
         self.captured_tree = {str(p.relative_to(cwd)): p.read_text() for p in cwd.rglob("*") if p.is_file()}
-        stdout = self.outputs[self.calls]
+        # Cycle rather than raise once outputs are exhausted - run_mode_c may
+        # call this more times than a test anticipated (neighbor-variant
+        # probing after the first mismatch), and tests not specifically
+        # asserting on `calls` shouldn't need to hand-count exactly that many
+        # scripted responses.
+        stdout = self.outputs[self.calls % len(self.outputs)]
         self.calls += 1
         return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
 
@@ -267,6 +245,34 @@ def test_module_dotted_name_for_nested_module():
 
 def test_module_dotted_name_for_flat_module():
     assert _module_dotted_name(Path("m.py")) == "m"
+
+
+def test_run_mode_c_caps_reported_mismatches_but_keeps_full_failing_tests_list():
+    """With characterization_fuzz_cases-scale case counts, a run with many
+    mismatches must not produce an unreadable detail string - but
+    failing_tests (structured, for programmatic consumption) must stay fully
+    uncapped. Every case here mismatches (py2 always returns 1, py3 always
+    returns 2), and the first mismatch triggers 3 neighbor-variant probes
+    (also mismatching, since the scripted outputs cycle) - so failing_tests
+    ends up longer than the case list itself."""
+    cases = [TestCase(function_name="divide", args_literal=f"({i}, 1)", rationale="case") for i in range(15)]
+    py2 = _ScriptedRuntime(outputs=["RESULT:1\n"])
+    py3 = _ScriptedRuntime(outputs=["RESULT:2\n"])
+
+    result = run_mode_c(
+        module_filename="mathutils.py",
+        module_source_py2="x",
+        module_source_py3="x",
+        test_plan_cases=cases,
+        py2_runtime=py2,
+        py3_runtime=py3,
+        evidence_source="docstring",
+    )
+
+    assert result.outcome == GateOutcome.FAIL
+    assert len(result.failing_tests) == 18  # 15 cases + 3 neighbor variants of the first failure
+    assert result.detail.count(";") + 1 == MAX_REPORTED_MISMATCHES
+    assert "...and 8 more mismatch(es)" in result.detail
 
 
 def test_run_mode_c_writes_closure_once_and_reuses_across_cases():
