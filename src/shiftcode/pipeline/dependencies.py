@@ -143,6 +143,42 @@ def dependency_closure(
     closure: list[FileUnit] = []
     truncated = False
 
+    # Real package `__init__.py` files along file_unit's OWN directory chain
+    # are needed for real package import semantics under Python 2 (no
+    # namespace-package support, unlike Python 3's implicit namespace
+    # packages) - confirmed real case: a leaf module verified on its own
+    # (empty import-edge closure) still needs its own package's __init__.py
+    # in the sandbox for `import mypkg.helpers` to work on py2 at all, even
+    # though nothing in helpers.py itself imports __init__.py (the
+    # dependency runs the other way). These are structural, not import-graph
+    # edges, so the BFS below never finds them on its own - seeded into the
+    # queue explicitly here, but ONLY when the real project genuinely has
+    # that __init__.py file. Never synthesized: a genuine namespace package
+    # with no __init__.py at all stays exactly that, matching the real
+    # project's actual import semantics rather than diverging from it.
+    #
+    # Seeded into the queue, not just appended to closure directly (real bug,
+    # found via a real multi-level package - pytoolz/toolz - where the top
+    # package's __init__.py itself re-exports from every subpackage,
+    # `from .itertoolz import (...)` etc.): an ancestor __init__.py can have
+    # real import dependencies of its OWN that also need to be in the
+    # closure - if it's only appended to `closure` without being queued for
+    # its own edges to be resolved, those get silently missed, and a test
+    # file importing through that ancestor package fails with
+    # ModuleNotFoundError on a subpackage nothing in file_unit's own chain
+    # ever referenced directly.
+    ancestor = file_unit.path.parent
+    while ancestor != root and ancestor.parent != ancestor:
+        init_unit = path_lookup.get(ancestor / "__init__.py")
+        if init_unit is not None and init_unit.path not in visited:
+            if len(closure) >= max_closure_files:
+                truncated = True
+                break
+            visited.add(init_unit.path)
+            closure.append(init_unit)
+            queue.append(init_unit)
+        ancestor = ancestor.parent
+
     while queue and not truncated:
         current = queue.pop(0)
         for edge in resolve_local_imports(current, all_file_units, root, path_lookup=path_lookup):
@@ -155,31 +191,6 @@ def dependency_closure(
                 break
             closure.append(dep)
             queue.append(dep)
-
-    # Real package `__init__.py` files along file_unit's OWN directory chain
-    # are needed for real package import semantics under Python 2 (no
-    # namespace-package support, unlike Python 3's implicit namespace
-    # packages) - confirmed real case: a leaf module verified on its own
-    # (empty import-edge closure) still needs its own package's __init__.py
-    # in the sandbox for `import mypkg.helpers` to work on py2 at all, even
-    # though nothing in helpers.py itself imports __init__.py (the
-    # dependency runs the other way). These are structural, not import-graph
-    # edges, so the BFS above never finds them - added here explicitly, but
-    # ONLY when the real project genuinely has that __init__.py file. Never
-    # synthesized: a genuine namespace package with no __init__.py at all
-    # stays exactly that, matching the real project's actual import
-    # semantics rather than diverging from it.
-    if not truncated:
-        ancestor = file_unit.path.parent
-        while ancestor != root and ancestor.parent != ancestor:
-            init_unit = path_lookup.get(ancestor / "__init__.py")
-            if init_unit is not None and init_unit.path not in visited:
-                if len(closure) >= max_closure_files:
-                    truncated = True
-                    break
-                visited.add(init_unit.path)
-                closure.append(init_unit)
-            ancestor = ancestor.parent
 
     degraded = [fu.path for fu in closure if fu.final_source is None and fu.deterministic_output is None]
     return ClosureResult(

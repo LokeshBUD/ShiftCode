@@ -21,6 +21,14 @@ class BehaviorResult:
     # "call_sites", "llm_inference", or a "+"-joined combination across the
     # file's functions. None for modes A/B.
     evidence_source: str | None = None
+    # Real, exact evidence volume - not a synthesized confidence score (see
+    # README's "confidence is never blended" principle). Modes A/C only:
+    # Mode A's real pytest-discovered test count, Mode C's total executed
+    # characterization cases (including neighbor-variant probes). None
+    # means "not meaningfully countable" - Mode B's single script
+    # comparison, or any UNVERIFIED outcome where nothing real ran.
+    cases_run: int | None = None
+    cases_passed: int | None = None
 
 
 @dataclass

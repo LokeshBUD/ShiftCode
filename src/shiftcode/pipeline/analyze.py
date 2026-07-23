@@ -127,6 +127,7 @@ def find_semantic_findings(
     findings.extend(_find_legacy_types_from_imports(tree))
     findings.extend(_find_normalize_encode_chains(tree))
     findings.extend(_find_builtin_cmp_calls(tree))
+    findings.extend(_find_inspect_getargspec_calls(tree))
 
     return findings, slices
 
@@ -250,6 +251,44 @@ def _find_builtin_cmp_calls(tree: ast.Module) -> list[Py2Finding]:
                     "'cmp(a, b)' was removed in Python 3 with no replacement - a bare "
                     "call raises NameError. Replace it with the idiomatic equivalent "
                     "'(a > b) - (a < b)', which preserves the same -1/0/1 semantics."
+                ),
+            )
+        )
+    return findings
+
+
+def _find_inspect_getargspec_calls(tree: ast.Module) -> list[Py2Finding]:
+    """`inspect.getargspec(f)` was deprecated across Python 3 and removed
+    entirely in Python 3.11 (`AttributeError: module 'inspect' has no
+    attribute 'getargspec'`) - lib2to3 has no fixer for it, since it's a
+    stdlib API removal, not a syntax difference (confirmed: no reference to
+    it anywhere in the vendored fixer set). Found via a real stress test
+    (docs/bug-log.md #23): `pytoolz/toolz`'s curried.py uses it to inspect a
+    function's arity. Narrowly matches the module-attribute call form
+    (`inspect.getargspec(...)`) - the only form seen in practice; a bare
+    `from inspect import getargspec` import would need its own detector,
+    not guessed at here."""
+    findings: list[Py2Finding] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "getargspec"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "inspect"
+        ):
+            continue
+        findings.append(
+            Py2Finding(
+                construct_name="inspect_getargspec_call",
+                line=node.lineno,
+                col=node.col_offset,
+                fixer_name=None,
+                needs_llm=True,
+                detail=(
+                    "'inspect.getargspec(...)' was removed in Python 3.11 - replace it "
+                    "with 'inspect.getfullargspec(...)', which has the same '.args' "
+                    "attribute and is available in every Python 3 version."
                 ),
             )
         )

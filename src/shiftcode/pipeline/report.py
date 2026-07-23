@@ -21,6 +21,8 @@ def _verify_summary(v: VerifyResult) -> dict:
             "mode": v.behavior.mode,
             "detail": v.behavior.detail,
             "evidence_source": v.behavior.evidence_source,
+            "cases_run": v.behavior.cases_run,
+            "cases_passed": v.behavior.cases_passed,
         }
     if v.determinism:
         out["determinism"] = {"outcome": v.determinism.outcome.value, "detail": v.determinism.detail}
@@ -82,6 +84,21 @@ def _colorize(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def _cases_summary_line(f: FileUnit) -> str | None:
+    """Real, exact evidence volume - generalizes what used to be a
+    Mode-C-only line (keyed off characterization_cases) to any mode that
+    tracks a real case count (behavior_gate.py's run_mode_a, run_mode_c) -
+    e.g. `206/209 cases passed (Mode A)`. None when nothing meaningfully
+    countable ran (Mode B, any UNVERIFIED outcome)."""
+    behavior = f.verify_result.behavior if f.verify_result else None
+    if behavior is None or behavior.cases_run is None:
+        return None
+    line = f"    {behavior.cases_passed}/{behavior.cases_run} cases passed (Mode {behavior.mode})"
+    if behavior.evidence_source:
+        line += f" (evidence: {behavior.evidence_source})"
+    return line
+
+
 def to_console(report: MigrationReport, *, color: bool = True) -> str:
     """Same information as to_text(), formatted for an interactive terminal:
     color-coded status badges and a per-status count header up top. Kept
@@ -110,12 +127,9 @@ def to_console(report: MigrationReport, *, color: bool = True) -> str:
             lines.append(f"    reason: {f.reason}")
         if f.repair_attempts:
             lines.append(f"    repair attempts: {len(f.repair_attempts)}")
-        if f.characterization_cases:
-            evidence = f.verify_result.behavior.evidence_source if f.verify_result and f.verify_result.behavior else None
-            lines.append(
-                f"    characterization tests: {len(f.characterization_cases)} case(s)"
-                + (f" (evidence: {evidence})" if evidence else "")
-            )
+        cases_line = _cases_summary_line(f)
+        if cases_line:
+            lines.append(cases_line)
     return "\n".join(lines)
 
 
@@ -136,10 +150,7 @@ def to_text(report: MigrationReport) -> str:
             lines.append(f"    reason: {f.reason}")
         if f.repair_attempts:
             lines.append(f"    repair attempts: {len(f.repair_attempts)}")
-        if f.characterization_cases:
-            evidence = f.verify_result.behavior.evidence_source if f.verify_result and f.verify_result.behavior else None
-            lines.append(
-                f"    characterization tests: {len(f.characterization_cases)} case(s)"
-                + (f" (evidence: {evidence})" if evidence else "")
-            )
+        cases_line = _cases_summary_line(f)
+        if cases_line:
+            lines.append(cases_line)
     return "\n".join(lines)

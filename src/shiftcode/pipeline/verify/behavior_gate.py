@@ -179,6 +179,8 @@ def run_mode_a(
             mode="A",
             detail="\n".join(detail_parts),
             failing_tests=[m.split(":")[0] for m in mismatches],
+            cases_run=len(all_names),
+            cases_passed=len(all_names) - len(mismatches),
         )
 
     if not stdout_matches:
@@ -196,9 +198,17 @@ def run_mode_a(
                 "interpreter-internal wording, e.g. an exception message, not a "
                 f"behavioral difference):\n--- py2 ---\n{py2_proc.stdout}\n--- py3 ---\n{py3_proc.stdout}"
             ),
+            cases_run=len(all_names),
+            cases_passed=len(all_names),
         )
 
-    return BehaviorResult(outcome=GateOutcome.PASS, mode="A", detail="all tests match, stdout identical")
+    return BehaviorResult(
+        outcome=GateOutcome.PASS,
+        mode="A",
+        detail="all tests match, stdout identical",
+        cases_run=len(all_names),
+        cases_passed=len(all_names),
+    )
 
 
 def run_mode_b(

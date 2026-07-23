@@ -51,7 +51,7 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
   draft* of exactly the kind of hand-written fixer this project already adds
   by hand when it finds a new bug class. See *Self-improving fixer library*
   below.
-- 222 unit tests, all passing, none of which require a real LLM or Docker
+- 233 unit tests, all passing, none of which require a real LLM or Docker
   (they run against a scripted stand-in provider/runtime).
 
 ## How it works
@@ -209,6 +209,16 @@ that: a gate failed, or nothing could verify the file at all (no test suite,
 no entry point, and Mode C had nothing to work with either) — flagged
 honestly rather than silently skipped.
 
+**Evidence volume, not a blended score.** Within a status, `BehaviorResult`
+also carries `cases_run`/`cases_passed` for Modes A/C — the real, exact count
+of tests or characterization cases actually executed (e.g. `206/209 cases
+passed (Mode A)`), not a synthesized 0-100 confidence number. Two files can
+both be `VERIFIED_INFERRED`, but one backed by 3 LLM-picked examples and
+another by 300 fuzzed cases is meaningfully different evidence — this makes
+that visible instead of hiding it inside free-text detail. `None` for Mode B
+(a single script comparison isn't a case count in the same sense) and for any
+`UNVERIFIED` outcome where nothing real ran.
+
 ### Sandboxing
 
 Both the original (py2) and candidate (py3) sides execute inside ephemeral
@@ -328,7 +338,7 @@ the `python:2.7` image pulled. Without one, every behavior gate correctly
 degrades to `UNVERIFIED` rather than fabricating a pass.
 
 ```bash
-pytest                                          # 222 tests, no LLM/Docker required
+pytest                                          # 233 tests, no LLM/Docker required
 shiftcode migrate <path> --dry-run              # list findings only, no LLM calls
 shiftcode migrate <path> --output-dir ./out     # full run
 shiftcode migrate <path> --characterization-fuzz-cases 50 --capture-repair-history  # opt into fuzzing + repair capture

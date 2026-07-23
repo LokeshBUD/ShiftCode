@@ -100,6 +100,43 @@ def test_dependency_closure_includes_own_package_init_even_with_no_import_edge_t
     assert {fu.path for fu in result.files} == {init.path}
 
 
+def test_dependency_closure_expands_an_ancestor_inits_own_imports(tmp_path):
+    """Regression from a real end-to-end run (`pytoolz/toolz` @ `498fefa`):
+    the previous fix above adds an ancestor __init__.py to the closure as a
+    FILE, but if that __init__.py itself re-exports from sibling subpackages
+    (`from .itertoolz import (...)`, a real, common package-root shape -
+    toolz's own top-level __init__.py does exactly this across three
+    subpackages), those imports were never traced - the ancestor init was
+    appended to `closure` but never enqueued for the BFS to resolve ITS own
+    edges. Confirmed real: `toolz/itertoolz/core.py` verified fine alone,
+    but `toolz/dicttoolz/core.py` (which has zero import edges of its own)
+    failed real Mode A collection with `ModuleNotFoundError: No module named
+    'toolz.itertoolz'` - a sibling subpackage `toolz/__init__.py` imports,
+    but nothing in dicttoolz/core.py's own chain ever references."""
+    root_init = _write(
+        tmp_path / "pkg" / "__init__.py",
+        "from .itertoolz import groupby\nfrom .dicttoolz import merge\n",
+    )
+    itertoolz_init = _write(tmp_path / "pkg" / "itertoolz" / "__init__.py", "from .core import groupby\n")
+    itertoolz_core = _write(tmp_path / "pkg" / "itertoolz" / "core.py", "def groupby(x):\n    return x\n")
+    dicttoolz_init = _write(tmp_path / "pkg" / "dicttoolz" / "__init__.py", "from .core import merge\n")
+    dicttoolz_core = _write(tmp_path / "pkg" / "dicttoolz" / "core.py", "def merge(*d):\n    return d\n")
+    all_units = [root_init, itertoolz_init, itertoolz_core, dicttoolz_init, dicttoolz_core]
+
+    result = dependency_closure(dicttoolz_core, all_units, tmp_path)
+
+    # dicttoolz_core has zero import edges of its own - everything here comes
+    # from the ancestor chain (dicttoolz/__init__.py, pkg/__init__.py) PLUS
+    # pkg/__init__.py's OWN real imports (itertoolz/__init__.py, itertoolz/core.py) -
+    # the sibling subpackage nothing in dicttoolz_core's own chain references.
+    assert {fu.path for fu in result.files} == {
+        dicttoolz_init.path,
+        root_init.path,
+        itertoolz_init.path,
+        itertoolz_core.path,
+    }
+
+
 def test_dependency_closure_never_synthesizes_a_missing_init(tmp_path):
     """A genuine namespace package (no __init__.py anywhere) must stay
     exactly that - never invent one that doesn't exist in the real project."""

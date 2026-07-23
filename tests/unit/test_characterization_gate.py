@@ -65,6 +65,8 @@ def test_run_mode_c_passes_when_results_match():
     assert result.outcome == GateOutcome.PASS
     assert result.mode == "C"
     assert result.evidence_source == "docstring"
+    assert result.cases_run == 1
+    assert result.cases_passed == 1
 
 
 def test_run_mode_c_fails_on_real_return_value_mismatch():
@@ -83,6 +85,12 @@ def test_run_mode_c_fails_on_real_return_value_mismatch():
 
     assert result.outcome == GateOutcome.FAIL
     assert "divide(7, 2)" in result.failing_tests[0]
+    # 1 original case + 3 neighbor-variant probes triggered by the first
+    # mismatch (all also mismatch here, since the scripted outputs are fixed
+    # regardless of args) - cases_run must reflect the TRUE total executed,
+    # not just the originally-proposed case count.
+    assert result.cases_run == 4
+    assert result.cases_passed == 0
 
 
 def test_run_mode_c_ignores_dict_key_ordering_differences():
@@ -233,6 +241,8 @@ def test_run_mode_c_unverified_when_all_cases_have_unsafe_args():
     assert result.outcome == GateOutcome.UNVERIFIED
     assert py2.calls == 0  # never even attempted execution
     assert py3.calls == 0
+    assert result.cases_run is None
+    assert result.cases_passed is None
 
 
 def test_module_dotted_name_for_package_init():
@@ -273,6 +283,10 @@ def test_run_mode_c_caps_reported_mismatches_but_keeps_full_failing_tests_list()
     assert len(result.failing_tests) == 18  # 15 cases + 3 neighbor variants of the first failure
     assert result.detail.count(";") + 1 == MAX_REPORTED_MISMATCHES
     assert "...and 8 more mismatch(es)" in result.detail
+    # cases_run reflects the TRUE total executed (uncapped, same as
+    # failing_tests) - not the capped detail-string count.
+    assert result.cases_run == 18
+    assert result.cases_passed == 0
 
 
 def test_run_mode_c_writes_closure_once_and_reuses_across_cases():

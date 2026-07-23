@@ -124,3 +124,23 @@ def test_find_semantic_findings_ignores_unrelated_cmp_calls():
     source = "def f(cmp):\n    return cmp.compare(1, 2)\n\ndef g():\n    return cmp(1, 2, 3)\n"
     findings, _ = find_semantic_findings(source)
     assert not any(f.construct_name == "builtin_cmp_call" for f in findings)
+
+
+def test_find_semantic_findings_detects_inspect_getargspec_call():
+    """Regression from a real stress test (docs/bug-log.md #23): pytoolz/toolz's
+    curried.py uses inspect.getargspec(f).args to inspect a function's arity -
+    removed entirely in Python 3.11, no lib2to3 fixer exists for it."""
+    source = "import inspect\n\ndef nargs(f):\n    return len(inspect.getargspec(f).args)\n"
+    findings, _ = find_semantic_findings(source)
+
+    matches = [f for f in findings if f.construct_name == "inspect_getargspec_call"]
+    assert len(matches) == 1
+    assert matches[0].needs_llm is True
+    assert matches[0].line == 4
+    assert "getfullargspec" in matches[0].detail
+
+
+def test_find_semantic_findings_ignores_unrelated_getargspec_calls():
+    source = "def f(x):\n    return x.getargspec()\n\ndef g():\n    return foo.getargspec(1)\n"
+    findings, _ = find_semantic_findings(source)
+    assert not any(f.construct_name == "inspect_getargspec_call" for f in findings)

@@ -182,6 +182,8 @@ def test_run_mode_a_passes_when_test_outcomes_match_even_if_stdout_text_differs(
 
     assert result.outcome == GateOutcome.PASS
     assert "interpreter-internal wording" in result.detail
+    assert result.cases_run == 2
+    assert result.cases_passed == 2
 
 
 def test_run_mode_a_fails_when_test_outcomes_genuinely_differ():
@@ -200,6 +202,8 @@ def test_run_mode_a_fails_when_test_outcomes_genuinely_differ():
 
     assert result.outcome == GateOutcome.FAIL
     assert "test_div" in result.failing_tests[0]
+    assert result.cases_run == 2
+    assert result.cases_passed == 1  # test_add ok, test_div mismatched
 
 
 def test_run_mode_a_does_not_vacuously_pass_when_zero_tests_discovered():
@@ -225,6 +229,8 @@ def test_run_mode_a_does_not_vacuously_pass_when_zero_tests_discovered():
 
     assert result.outcome == GateOutcome.UNVERIFIED
     assert "0 tests" in result.detail
+    assert result.cases_run is None
+    assert result.cases_passed is None
 
 
 _COLLECTION_ERROR_XML = (
@@ -256,6 +262,8 @@ def test_run_mode_a_does_not_vacuously_pass_when_both_sides_fail_collection_iden
 
     assert result.outcome == GateOutcome.UNVERIFIED
     assert "collection failed identically" in result.detail
+    assert result.cases_run is None
+    assert result.cases_passed is None
 
 
 def test_run_mode_a_still_fails_when_one_side_errors_and_other_has_real_outcomes():

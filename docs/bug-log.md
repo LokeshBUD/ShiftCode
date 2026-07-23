@@ -10,6 +10,38 @@ Format: newest first.
 
 ---
 
+## 23. `inspect.getargspec(...)` produced zero findings - removed in Python 3.11 with no fixer anywhere, so it was never caught
+
+**Found via:** `pytoolz/toolz` @ `498fefa`, same run as #21/#22. Once those two dependency-closure fixes let `toolz/curried.py`'s real test suite actually run, it failed for a genuine, different reason: `curried.py` uses `inspect.getargspec(f).args` to inspect a function's arity, which raises `AttributeError: module 'inspect' has no attribute 'getargspec'` on this Python 3 (removed in 3.11) - confirmed via `grep` across the vendored fixer set that no `lib2to3` fixer references it, and this project's own semantic-findings scanner had no detection for it either, same shape as #7 and #19.
+
+**Root cause:** a stdlib API removal, not a syntax difference - exactly the class of bug `lib2to3` structurally can't catch and nothing in `analyze.py` was watching for yet.
+
+**Fix:** new `_find_inspect_getargspec_calls` in `analyze.py`, registered in `find_semantic_findings`. Same posture as #7/#8/#19 - `needs_llm=True`, detection is deterministic, the actual fix (`inspect.getargspec` → `inspect.getfullargspec`, same `.args` attribute) goes through the normal Planner/Refactorer/Auditor loop. Confirmed live: `toolz/curried.py` went from a Mode A collection crash to real `VERIFIED` (2/2) after this fix.
+
+---
+
+## 22. Mode A's dependency closure never included the paired TEST FILE's own local imports - only the module's
+
+**Found via:** `pytoolz/toolz` @ `498fefa`, first library scouted specifically to stress differential fuzzing and the confidence-count fields on genuinely unseen real code. `toolz/dicttoolz/tests/test_core.py` does `from toolz.utils import raises`, but `toolz/dicttoolz/core.py` (the module actually under test) has zero import statements of its own - a real, correct, common shape (a leaf implementation module using only builtins). Reproduced directly: `run_mode_a`'s sandbox had the module's own closure (via bug #21's fix, correctly including `toolz/__init__.py`'s real re-exports) but never the test file's, so pytest failed collection with `ModuleNotFoundError: No module named 'toolz.utils'` - looked identical to a real behavior mismatch, or got masked entirely as `UNVERIFIED` by the vacuous-pass guard (#12).
+
+**Root cause:** `dependency_closure()` is always computed starting from the module under test (`file_unit` in `orchestrator.py`'s Phase B loop) - the test file the sandbox also has to run was never used as a second BFS root, so its own real local-import needs were structurally invisible to the closure computation, regardless of #21's fix.
+
+**A real bug caught by the test written for this fix, before it shipped:** the first version merged the test file's own closure in unconditionally - but a test file almost always imports the module under test itself, so its closure naturally resolves an edge right back to that module. Merging that edge in let `write_sandbox_tree`'s closure-write step (which runs *after* the module's own write) silently clobber the actual live candidate source being verified with the `FileUnit`'s stale `original_source`/`final_source` - verifying the wrong thing with no error at all. Caught immediately because the regression test asserted the merged closure's exact contents rather than just "doesn't crash."
+
+**Fix:** new `_closure_including_test_file()` (`orchestrator.py`) - computes the module's closure as before, then (if a Mode A test pairing exists) computes a *second* closure rooted at the test file itself, merges the two (deduped by relative path), and explicitly excludes the module-under-test's own path from the test file's contribution. `BehaviorTestInfo` gained a `test_path: Path | None` field (previously only the matched test's basename/content were kept, not its real path - needed here to look up its own `FileUnit` for a real closure computation, especially since a bare filename like `test_core.py` is genuinely ambiguous in `toolz`'s own tree, which has three different `tests/test_core.py` files in three different subpackages). Confirmed live: `toolz/dicttoolz/core.py`, `toolz/functoolz/core.py`, `toolz/itertoolz/recipes.py`, `toolz/utils.py` all went from 0 files verified to real `VERIFIED` via genuine Mode A runs.
+
+---
+
+## 21. `dependency_closure`'s ancestor-`__init__.py` inclusion (bug #15) added those files to the sandbox but never traced THEIR OWN imports
+
+**Found via:** same `pytoolz/toolz` run as #22 above. `toolz/dicttoolz/core.py` (zero import edges of its own) still failed real Mode A collection: `ModuleNotFoundError: No module named 'toolz.itertoolz'`. `toolz/__init__.py` (a real ancestor of the module under test, needed for Python 2's lack of namespace-package support - exactly what bug #15 added) itself does `from .itertoolz import (...)`, `from .functoolz import (...)`, `from .dicttoolz import (...)` - re-exporting from every subpackage, a real and common package-root shape.
+
+**Root cause:** bug #15's ancestor-inclusion loop (`dependency_closure()`) appends each ancestor `__init__.py` directly to `closure`, but never adds it to the BFS `queue` - so the main traversal never resolves *its* own import edges. Fine for an ancestor `__init__.py` with no real imports of its own (the case #15 was built against), broken the moment a real ancestor `__init__.py` re-exports from siblings, which `toolz`'s top-level `__init__.py` genuinely does.
+
+**Fix:** the ancestor-inclusion loop now also appends each discovered ancestor `__init__.py` to `queue` (moved to run before the main BFS loop, which now naturally expands whatever real imports those ancestors have, same dedup/cap logic as everything else). Confirmed via a new regression test (`test_dependencies.py`) reproducing `toolz`'s exact three-subpackage re-export shape, and live against the real repo.
+
+---
+
 ## 20. Mode A's sandbox never wrapped `__init__.py` in a package directory when the migration root itself IS the package - test imports failed identically on both interpreters
 
 **Found via:** a full regression re-run of every real library previously stress-tested this session (`docopt`, `python-slugify`, `inflection`, `jsonschema`, `purl`, `html2text`, `schedule`, `requests`), run fully unattended after this session's other changes (differential fuzzing, self-improving fixer library) to confirm nothing regressed. 6/8 matched documented results exactly; `docopt` hit already-known LLM output non-determinism (unrelated). `python-slugify` and `schedule` both newly landed on `NEEDS_REVIEW` where they'd previously reached `VERIFIED_INFERRED`.

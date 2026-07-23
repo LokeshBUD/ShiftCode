@@ -115,7 +115,9 @@ def _discover_test_pairs(file_units: list[FileUnit]) -> dict[Path, BehaviorTestI
                         break
 
         if matched is not None:
-            pairs[fu.path] = BehaviorTestInfo(test_filename=matched.name, test_source=matched.read_text())
+            pairs[fu.path] = BehaviorTestInfo(
+                test_filename=matched.name, test_source=matched.read_text(), test_path=matched
+            )
     return pairs
 
 
@@ -180,6 +182,49 @@ def _sandbox_root_prefix(
         if inferred is not None:
             return Path(inferred)
     return Path(effective_root.name)
+
+
+def _closure_including_test_file(
+    file_unit: FileUnit,
+    test_info: BehaviorTestInfo | None,
+    file_units: list[FileUnit],
+    effective_root: Path,
+    *,
+    max_closure_files: int,
+) -> list[ClosureFile]:
+    """The module under test's dependency closure, merged with the paired
+    test file's OWN closure. A Mode A test file can have real local imports
+    independent of what the module itself imports (real case, found via a
+    full end-to-end run against `pytoolz/toolz`: a test file does `from
+    toolz.utils import raises`, but nothing in the module being verified
+    imports toolz.utils at all - only the test file needs it). Without this,
+    the sandbox has the module's closure but not the test file's, and pytest
+    fails to even collect the test - looks identical to a real behavior
+    mismatch (or gets masked as UNVERIFIED by the vacuous-pass guard) but is
+    actually just a missing sandbox file. Deduped by rel_path so a file both
+    sides need isn't written/considered twice."""
+    closure_result = dependency_closure(file_unit, file_units, effective_root, max_closure_files=max_closure_files)
+    closure = closure_files_for_sandbox(closure_result, effective_root)
+    if test_info is None or test_info.test_path is None:
+        return closure
+    test_file_unit = next((fu for fu in file_units if fu.path == test_info.test_path), None)
+    if test_file_unit is None:
+        return closure
+    test_closure_result = dependency_closure(
+        test_file_unit, file_units, effective_root, max_closure_files=max_closure_files
+    )
+    test_closure = closure_files_for_sandbox(test_closure_result, effective_root)
+    # The test file almost always imports the module under test itself -
+    # that edge must NOT be merged in: write_sandbox_tree writes the module
+    # separately, with the actual live candidate source being verified right
+    # now (module_source_py2/py3), not the FileUnit's own possibly-stale
+    # original_source/final_source a generic ClosureFile entry would carry.
+    # Merging it in would let the closure-write step (which runs AFTER the
+    # module write) silently clobber the real candidate with stale content -
+    # verifying the wrong source without any error.
+    module_rel_path = file_unit.path.relative_to(effective_root)
+    existing_rel_paths = {cf.rel_path for cf in closure} | {module_rel_path}
+    return closure + [cf for cf in test_closure if cf.rel_path not in existing_rel_paths]
 
 
 def _audit_deterministic_transform(
@@ -606,10 +651,14 @@ def run_migration(
         for file_unit in ordered_units:
             if file_unit.status == Status.NEEDS_REVIEW:
                 continue  # Phase A failed for this file (or pre-flagged at ingest)
-            closure_result = dependency_closure(
-                file_unit, file_units, effective_root, max_closure_files=config.max_dependency_closure_files
+            test_info = test_pairs.get(file_unit.path)
+            closure = _closure_including_test_file(
+                file_unit,
+                test_info,
+                file_units,
+                effective_root,
+                max_closure_files=config.max_dependency_closure_files,
             )
-            closure = closure_files_for_sandbox(closure_result, effective_root)
             module_rel_path = file_unit.path.relative_to(effective_root)
             if sandbox_root_prefix is not None:
                 module_rel_path = sandbox_root_prefix / module_rel_path
@@ -622,7 +671,7 @@ def run_migration(
                     runtimes=runtimes,
                     max_attempts=config.max_repair_attempts,
                     determinism_runs=config.determinism_runs,
-                    test_info=test_pairs.get(file_unit.path),
+                    test_info=test_info,
                     characterization_info=characterization_infos.get(file_unit.path),
                     dependency_closure=closure,
                     module_rel_path=module_rel_path,

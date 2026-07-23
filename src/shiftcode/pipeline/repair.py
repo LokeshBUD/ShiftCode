@@ -48,6 +48,15 @@ class BehaviorTestInfo:
 
     test_filename: str
     test_source: str
+    # Real matched path (not just basename) - the test file can have its own
+    # real local imports independent of the module under test's own import
+    # graph (real case, found via `pytoolz/toolz`: a test file does `from
+    # toolz.utils import raises`, but nothing in the module under test
+    # itself imports toolz.utils - only the test file needs it). Needed to
+    # compute a real dependency closure FOR the test file itself, not just
+    # the module. None only in tests that construct this directly without a
+    # real ingested file backing it.
+    test_path: Path | None = None
 
 
 @dataclass

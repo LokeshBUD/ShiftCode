@@ -196,6 +196,8 @@ def run_mode_c(
             detail=" ".join(detail_parts),
             failing_tests=failing_cases,
             evidence_source=evidence_source,
+            cases_run=len(cases_to_run),
+            cases_passed=len(cases_to_run) - len(failing_cases),
         )
 
     return BehaviorResult(
@@ -203,4 +205,6 @@ def run_mode_c(
         mode="C",
         detail=f"{len(valid_cases)} auto-generated characterization test(s) passed (evidence: {evidence_source})",
         evidence_source=evidence_source,
+        cases_run=len(valid_cases),
+        cases_passed=len(valid_cases),
     )
