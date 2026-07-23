@@ -103,3 +103,24 @@ def test_find_semantic_findings_ignores_unrelated_encode_calls():
     source = "def f(s):\n    return s.encode('utf-8')\n"
     findings, _ = find_semantic_findings(source)
     assert not any(f.construct_name == "normalize_encode_bytes_result" for f in findings)
+
+
+def test_find_semantic_findings_detects_builtin_cmp_call():
+    """First graduated detector from the self-improving fixer library
+    (repair_history.py / suggest-fixer-rules): cmp() was a Python 2 builtin
+    removed entirely in Python 3, no lib2to3 fixer exists for it, and a bare
+    call raises NameError."""
+    source = "def sort_key_compare(a, b):\n    return cmp(a.priority, b.priority)\n"
+    findings, _ = find_semantic_findings(source)
+
+    matches = [f for f in findings if f.construct_name == "builtin_cmp_call"]
+    assert len(matches) == 1
+    assert matches[0].needs_llm is True
+    assert matches[0].line == 2
+    assert "(a > b) - (a < b)" in matches[0].detail
+
+
+def test_find_semantic_findings_ignores_unrelated_cmp_calls():
+    source = "def f(cmp):\n    return cmp.compare(1, 2)\n\ndef g():\n    return cmp(1, 2, 3)\n"
+    findings, _ = find_semantic_findings(source)
+    assert not any(f.construct_name == "builtin_cmp_call" for f in findings)

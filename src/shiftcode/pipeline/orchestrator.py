@@ -1,4 +1,6 @@
 import ast
+import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -115,6 +117,69 @@ def _discover_test_pairs(file_units: list[FileUnit]) -> dict[Path, BehaviorTestI
         if matched is not None:
             pairs[fu.path] = BehaviorTestInfo(test_filename=matched.name, test_source=matched.read_text())
     return pairs
+
+
+# Third-party test-tooling packages common enough to reliably NOT be the
+# package under test itself, when inferring the real import name below -
+# real case that motivated this: schedule's own test_schedule.py does
+# `import mock` BEFORE `import schedule`, so "first non-stdlib import" alone
+# would have picked the wrong name.
+_TEST_TOOLING_IMPORT_DENYLIST = {"mock", "pytest", "nose", "hypothesis", "six", "mox", "unittest2", "parameterized"}
+
+
+def _infer_package_import_name(test_source: str, *, root_name_hint: str) -> str | None:
+    """What name does this test file actually import the package under test
+    by? The migration root's own directory name is NOT reliable for this -
+    real case: `python-slugify` (the clone/repo directory name) ships a
+    module actually imported as `slugify`, not `python-slugify` (not even a
+    valid identifier). Scans the test source's own top-level imports for the
+    real evidence instead, preferring one that resembles root_name_hint (a
+    soft prior, not a guess used alone) and falling back to the first
+    candidate that isn't stdlib or common test tooling."""
+    try:
+        tree = ast.parse(test_source)
+    except SyntaxError:
+        return None
+
+    candidates: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            top = node.module.split(".")[0]
+        elif isinstance(node, ast.Import):
+            top = node.names[0].name.split(".")[0]
+        else:
+            continue
+        if top in sys.stdlib_module_names or top in _TEST_TOOLING_IMPORT_DENYLIST:
+            continue
+        candidates.append(top)
+    if not candidates:
+        return None
+
+    normalized_hint = root_name_hint.lower().replace("-", "").replace("_", "")
+    for candidate in candidates:
+        if candidate.lower() in normalized_hint:
+            return candidate
+    return candidates[0]
+
+
+def _sandbox_root_prefix(
+    effective_root: Path, file_units: list[FileUnit], test_pairs: dict[Path, BehaviorTestInfo]
+) -> Path | None:
+    """None (no wrapping - today's byte-for-byte unchanged behavior) unless
+    the migration root itself is a package (its own __init__.py sits
+    directly in it). When it is, infers the real importable package name
+    from that file's paired test source if one was found, falling back to
+    the root's own directory name only when no better evidence exists."""
+    root_init = effective_root / "__init__.py"
+    if not root_init.is_file():
+        return None
+    root_file_unit = next((fu for fu in file_units if fu.path == root_init), None)
+    test_info = test_pairs.get(root_init) if root_file_unit else None
+    if test_info is not None:
+        inferred = _infer_package_import_name(test_info.test_source, root_name_hint=effective_root.name)
+        if inferred is not None:
+            return Path(inferred)
+    return Path(effective_root.name)
 
 
 def _audit_deterministic_transform(
@@ -473,6 +538,25 @@ def run_migration(
     total = len(file_units)
     characterization_infos: dict[Path, CharacterizationInfo] = {}
 
+    # When the migration root itself IS a package (its own __init__.py sits
+    # directly in it, not inside a subdirectory - e.g. `shiftcode migrate
+    # some_pkg/`), every path computed relative to effective_root collapses
+    # package-name info that a real test importing it depends on:
+    # `__init__.py`'s own module_rel_path becomes a bare `Path("__init__.py")`,
+    # so write_sandbox_tree writes it unwrapped at the sandbox root - a real
+    # test's import fails identically on both interpreters (real regression,
+    # confirmed via re-running `schedule` and `python-slugify`: both
+    # previously VERIFIED_INFERRED via Mode C, started failing once
+    # test-pairing-by-package-name (bug-log.md #17) began correctly routing
+    # them to Mode A - Mode A never got the same package-wrapping fix Mode C
+    # got for the analogous `purl` case, #13). Prefixing every
+    # sandbox-relative path with the correct package name reconstructs
+    # exactly the layout a real import needs, without touching any of the
+    # real on-disk resolution logic (dependency_closure/resolve_local_imports
+    # still use the real effective_root unchanged) - purely a sandbox
+    # presentation fix.
+    sandbox_root_prefix = _sandbox_root_prefix(effective_root, file_units, test_pairs)
+
     try:
         # Phase A: transform + findings + Planner + Mode C case generation
         # for every file, before ANY file reaches Phase B - guarantees every
@@ -527,6 +611,9 @@ def run_migration(
             )
             closure = closure_files_for_sandbox(closure_result, effective_root)
             module_rel_path = file_unit.path.relative_to(effective_root)
+            if sandbox_root_prefix is not None:
+                module_rel_path = sandbox_root_prefix / module_rel_path
+                closure = [replace(cf, rel_path=sandbox_root_prefix / cf.rel_path) for cf in closure]
             try:
                 _process_file_phase_b(
                     file_unit,

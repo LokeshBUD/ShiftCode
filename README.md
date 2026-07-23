@@ -37,8 +37,22 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
   cycle: the Planner initially reasoned incorrectly about Python 2 division
   semantics, the verification gate caught the real behavioral mismatch (not a
   guess), the Auditor diagnosed it, and the Refactorer fixed it on retry.
-- 75 unit tests, all passing, none of which require a real LLM or Docker (they
-  run against a scripted stand-in provider/runtime).
+- **Multi-file aware**: real local-import resolution, transitive dependency
+  closures, and topological repair ordering — a file's actual sibling/package
+  imports resolve for real inside the verification sandbox instead of failing
+  identically on both interpreters. Validated against genuinely popular real
+  libraries (`requests`, `purl`), not just synthetic fixtures.
+- **Differential fuzzing for Mode C**: optionally expands the LLM's proposed
+  test inputs into hundreds of deterministically-generated cases per function
+  instead of a handful, with zero extra LLM cost. See *Differential fuzzing*
+  below.
+- **Self-improving fixer library**: confirmed repairs can be captured and
+  turned into permanent, deterministic detectors — automating the *first
+  draft* of exactly the kind of hand-written fixer this project already adds
+  by hand when it finds a new bug class. See *Self-improving fixer library*
+  below.
+- 222 unit tests, all passing, none of which require a real LLM or Docker
+  (they run against a scripted stand-in provider/runtime).
 
 ## How it works
 
@@ -158,6 +172,28 @@ apply regardless of mode:
   Characterization agent proposes candidate inputs from that evidence; the
   actual expected behavior always comes from running the real original code
   with those inputs inside a sandbox, never from the LLM's guess.
+### Differential fuzzing (optional, Mode C)
+
+Off by default (`characterization_fuzz_cases: int = 0` — additive, zero
+behavior change unless opted into). When enabled, the Characterization agent
+proposes a per-parameter *seed pool* (representative literal values, not full
+argument tuples) instead of a handful of full examples, and
+`pipeline/verify/fuzz_generation.py` — pure, deterministic, zero further LLM
+cost — expands that pool into up to the configured budget of concrete test
+cases: a round-robin combinatorial pass (every seed value gets used at least
+once) followed by type-dispatched boundary mutation. Same one-LLM-call-per-file
+cost as the non-fuzzing path; only sandbox execution time scales with the
+budget. Every case still runs through the exact same `ast.literal_eval`-only
+safety gate as a single hand-picked example — the evidence *volume* changes,
+the safety posture and what `VERIFIED_INFERRED` means don't.
+
+Once a mismatch is found, a small fixed number of boundary-nudged variants of
+that *first* failing case are generated and run too — a cheap, non-library
+analog of property-based-testing shrinking: not a provably-minimal repro, but
+enough to show whether a failure is boundary-specific or broad. The full case
+budget still runs even after a mismatch — stopping early would hide that
+signal.
+
 - **Determinism gate** — runs the candidate multiple times (default 3),
   comparing outputs. New variance introduced only on the migrated side is a
   hard fail. Pre-existing flakiness already present in the legacy code (e.g.
@@ -193,25 +229,68 @@ model response trying to smuggle `__import__("os").system(...)` through this
 field simply fails to parse and is discarded before any driver script is even
 built.
 
+## Self-improving fixer library
+
+When ShiftCode hits a real py2/py3 semantic-drift bug it hasn't seen before
+(e.g. the `unicodedata.normalize(...).encode(...)` bytes/str trap, or a
+legacy `types` module import — both in `docs/bug-log.md`), a human currently
+has to notice it and hand-write a permanent detector into `analyze.py`, or it
+stays a one-off caught only by an expensive live diagnose-from-scratch cycle
+next time. This turns that into an offline, opt-in loop instead of relying on
+a human to happen to generalize every bug by hand:
+
+1. **Capture** (`--capture-repair-history`, off by default) — after a real
+   migration run, every file that reached `VERIFIED`/`VERIFIED_INFERRED` via
+   a genuinely Auditor-diagnosed repair (not just a blind retry) gets its
+   before/after source and root-cause hint appended to a local JSONL log
+   (`pipeline/repair_history.py`). Pure serialization, zero LLM cost.
+2. **Draft** (`shiftcode suggest-fixer-rules --history ... --out
+   candidate_fixers/`) — offline, standalone from `migrate`. A new agent,
+   `FixerRuleAgent` (`agents/fixer_rule.py`), generalizes one confirmed
+   repair into a candidate detector: a precise trigger/fix/safety-conditions
+   description plus a starting-point `ast.walk` function body, in the real
+   style of `analyze.py`'s existing hand-written detectors. Written to a
+   plain `.py` file — **never executed automatically anywhere** in the
+   pipeline.
+3. **Graduate** (a human process, not new code) — a human reviews the
+   candidate like a normal PR, edits it, writes the same two tests every
+   existing detector has (`test_analyze.py`), and hand-merges it into
+   `analyze.py`. From then on that bug shape is caught deterministically and
+   instantly on every future migration, no Docker, no dependency on test
+   coverage happening to exercise it.
+
+This was validated for real, not just unit-tested: `docs/bug-log.md` #19
+(`_find_builtin_cmp_calls`, catching Python 2's removed `cmp()` builtin — a
+real gap, confirmed by inspecting the vendored `lib2to3` fixer set directly)
+is the first detector this project gained without a human writing the
+AST-walk code from scratch. A live feasibility test against
+`gemini-3.5-flash-lite` (the model already in production use here) also
+surfaced a real, useful limit: it's reliably good at *generalizing* a
+confirmed fix into a precise rule, but not reliably faithful at *applying*
+one un-reviewed — which is exactly why step 3 stays a human gate instead of
+becoming another automated step.
+
 ## File structure
 
 ```
 src/shiftcode/
-├── cli.py                      # `shiftcode migrate <path>` entrypoint
+├── cli.py                      # `shiftcode migrate <path>` / `suggest-fixer-rules` entrypoints
 ├── config.py                   # provider config, precedence: CLI > env > pyproject.toml > defaults
 ├── llm/                        # provider abstraction (OpenAI-compatible client)
-├── agents/                     # Transform Auditor, Planner, Refactorer, Auditor, Characterization
+├── agents/                     # Transform Auditor, Planner, Refactorer, Auditor, Characterization, Fixer-Rule
 ├── prompts/                    # static prompt templates for each agent
 ├── pipeline/
 │   ├── ingest.py                # file discovery
-│   ├── analyze.py               # lib2to3 dry-run + ast semantic scan
+│   ├── analyze.py               # lib2to3 dry-run + ast semantic scan (incl. graduated fixer-library detectors)
 │   ├── call_sites.py            # AST call-site evidence extraction (Mode C)
 │   ├── dependencies.py          # local-import resolution, dependency closure, topological order
+│   ├── repair_history.py        # captures confirmed repairs -> self-improving fixer library input
 │   ├── transform/deterministic.py  # the zero-LLM mechanical fixer pass
 │   ├── verify/
 │   │   ├── syntax_gate.py
 │   │   ├── behavior_gate.py     # Mode A / Mode B
 │   │   ├── characterization_gate.py  # Mode C
+│   │   ├── fuzz_generation.py   # differential fuzzing: seed-pool expansion + mutation, pure/deterministic
 │   │   ├── determinism.py
 │   │   └── sandbox_runtime.py   # containerized py2/py3 execution + fallback policy + closure-aware sandbox tree
 │   ├── repair.py                # Auditor<->Refactorer loop, wires every gate
@@ -249,9 +328,11 @@ the `python:2.7` image pulled. Without one, every behavior gate correctly
 degrades to `UNVERIFIED` rather than fabricating a pass.
 
 ```bash
-pytest                                          # 80 tests, no LLM/Docker required
+pytest                                          # 222 tests, no LLM/Docker required
 shiftcode migrate <path> --dry-run              # list findings only, no LLM calls
 shiftcode migrate <path> --output-dir ./out     # full run
+shiftcode migrate <path> --characterization-fuzz-cases 50 --capture-repair-history  # opt into fuzzing + repair capture
+shiftcode suggest-fixer-rules --history .shiftcode/repair_history.jsonl --out candidate_fixers/  # offline, draft candidate detectors
 ```
 
 ## Validated against real code
@@ -264,17 +345,18 @@ crashed/blocked runs too, not just wins.
 
 | # | Library | Pair | Outcome | Status |
 |---|---------|------|---------|--------|
+| 10 | full corpus regression re-run | py2→py3 | re-ran all 8 previously-tested libraries fully unattended after this session's other work, to confirm nothing regressed. 6/8 matched exactly, 1 hit known LLM flakiness, 2 (`python-slugify`, `schedule`) found a real bug — fixed, both now upgraded to real `VERIFIED` | complete |
 | 9 | [`requests`](https://github.com/kennethreitz/requests) | py2→py3 | first real multi-file library stress-tested; `requests/core.py` and a nested vendored submodule reach `VERIFIED_INFERRED`; `requests/__init__.py` reaches real Mode A (its own test suite correctly fails on live network calls, blocked by the sandbox's own `--network none` isolation — not a bug) | complete |
 | 8 | [`purl`](https://github.com/codeinthehole/purl) (re-validated, real nested layout) | py2→py3 | `purl/__init__.py` reaches genuine real `VERIFIED` via Mode A — real multi-file dependency-aware sandboxing closes the original false-`VERIFIED` bug for good | complete |
-| 7 | [`schedule`](https://github.com/dbader/schedule) | py2→py3 | `__init__.py` reaches genuine `VERIFIED_INFERRED` — 9 auto-generated characterization tests pass on both interpreters | complete — clean confirmation run, no new bugs |
+| 7 | [`schedule`](https://github.com/dbader/schedule) | py2→py3 | `__init__.py` reaches real `VERIFIED` — its own test suite runs and passes for real (upgraded from an initial `VERIFIED_INFERRED` once entry 10's sandbox-wrapping fix landed) | complete |
 | 6 | [`html2text`](https://github.com/aaronsw/html2text) | py2→py3 | no test suite (deliberately chosen); found and fixed a diagnostic-clarity bug on an obscure `lib2to3`-unfixable construct | complete |
 | 5 | [`purl`](https://github.com/codeinthehole/purl) | py2→py3 | found and fixed a real, high-value bug — a false `VERIFIED` caused by both interpreters failing test collection identically | complete |
 | 4 | [`jsonschema`](https://github.com/python-jsonschema/jsonschema) | py2→py3 | `jsonschema.py` runs its real 209-test suite via Mode A (was silently only 12); found and fixed 3 real bugs | complete |
 | 3 | [`inflection`](https://github.com/jpvanhal/inflection) | py2→py3 | `inflection.py` reaches real `VERIFIED` — its real pytest suite passes on both interpreters | complete |
-| 2 | [`python-slugify`](https://github.com/un33k/python-slugify) | py2→py3 | `__init__.py` reaches `VERIFIED_INFERRED` — all 5 auto-generated characterization tests pass on both interpreters | complete |
+| 2 | [`python-slugify`](https://github.com/un33k/python-slugify) | py2→py3 | `__init__.py` reaches real `VERIFIED` — its own test suite runs and passes for real (upgraded from an initial `VERIFIED_INFERRED` once entry 10's sandbox-wrapping fix landed) | complete |
 | 1 | [`docopt`](https://github.com/docopt/docopt) | py2→py3 | real corruption bug found *and correctly fixed*; `docopt.py` reaches real `VERIFIED` end-to-end | complete — first file to reach real `VERIFIED` on real historical code |
 
-Nine runs, all fully resolved with no open blockers. `purl`'s original
+Ten runs, all fully resolved with no open blockers. `purl`'s original
 false-`VERIFIED` finding (`docs/bug-log.md` #13) turned out to need real
 multi-file dependency-aware sandboxing to close for good, not just a narrow
 special case — built and confirmed via a purpose-built fixture
@@ -314,17 +396,27 @@ Full detail: `docs/stress-test-log.md`. The process every run follows:
   see `docs/bug-log.md` #6.
 - Semantic-findings detection (the set of py2/py3 behavior changes that get
   flagged for LLM judgment) is a growing, evidence-driven list, not
-  exhaustive: ambiguous division, legacy `types` module imports, and the
-  `unicodedata.normalize(...).encode(...)` bytes/str trap so far — each
-  added after being confirmed on real code, not guessed in advance.
+  exhaustive: ambiguous division, legacy `types` module imports, the
+  `unicodedata.normalize(...).encode(...)` bytes/str trap, and the removed
+  `cmp()` builtin so far — each added after being confirmed on real code
+  (or, for the last one, drafted by the self-improving fixer library and
+  reviewed by hand), not guessed in advance.
 
 ## Bug log
 
 `docs/bug-log.md` tracks real bugs found in ShiftCode itself — mostly via
 stress-testing against real external code, not the bundled fixtures — with
 root cause and what now catches that class of bug going forward (a fix, a
-new gate, or a new agent). 18 entries so far, all found via genuine stress
-testing against real libraries: two vendored-fixer/gate bugs on `docopt`
+new gate, or a new agent). 20 entries so far. The two newest were found a
+different way each: #20 via a full unattended regression re-run of the whole
+real-library corpus after this session's other changes (a real sandbox gap
+that only showed up once an earlier fix — package-name test-matching — started
+routing two libraries into Mode A for the first time; both now reach real
+`VERIFIED`, stronger than before); #19 via the self-improving fixer library's
+first real graduation — a candidate detector for Python 2's removed `cmp()`
+builtin, drafted by `FixerRuleAgent` against a real confirmed repair, reviewed
+and merged by hand. The other 18, all found via genuine
+stress testing against real libraries: two vendored-fixer/gate bugs on `docopt`
 (shadowed-identifier corruption, vacuous Mode A pass), a crash-isolation bug
 and a diagnostic-clarity gap on `python-slugify`, a sandbox-dependency
 blocker confirmed independently on two libraries (fixed), a repair-loop gap

@@ -126,6 +126,7 @@ def find_semantic_findings(
 
     findings.extend(_find_legacy_types_from_imports(tree))
     findings.extend(_find_normalize_encode_chains(tree))
+    findings.extend(_find_builtin_cmp_calls(tree))
 
     return findings, slices
 
@@ -211,6 +212,47 @@ def _find_legacy_types_from_imports(tree: ast.Module) -> list[Py2Finding]:
                     ),
                 )
             )
+    return findings
+
+
+def _find_builtin_cmp_calls(tree: ast.Module) -> list[Py2Finding]:
+    """`cmp(a, b)` was a builtin in Python 2 (returns -1/0/1) - removed
+    entirely in Python 3 with no replacement, and there's no lib2to3 fixer
+    for it (confirmed: no fix_cmp in the vendored fixer set - `ls
+    vendor/lib2to3/fixes/`). A bare call raises NameError under Python 3.
+    First graduated detector from the self-improving fixer library
+    (pipeline/repair_history.py / `suggest-fixer-rules`): drafted by
+    FixerRuleAgent against a real confirmed repair, reviewed and merged by
+    hand - see docs/bug-log.md for the graduation process this exercises.
+    Narrowly matches exactly 2 positional args to a bare `cmp` name (not an
+    attribute/method call) - a local function also named `cmp` with this
+    same 2-arg shape would false-positive, but that's the same class of
+    identifier-shadowing risk `_find_legacy_types_from_imports` above also
+    doesn't guard against; TransformAuditorAgent's scope-aware review is
+    what actually catches shadowing (see bug-log.md #1), not this detector."""
+    findings: list[Py2Finding] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "cmp"
+            and len(node.args) == 2
+        ):
+            continue
+        findings.append(
+            Py2Finding(
+                construct_name="builtin_cmp_call",
+                line=node.lineno,
+                col=node.col_offset,
+                fixer_name=None,
+                needs_llm=True,
+                detail=(
+                    "'cmp(a, b)' was removed in Python 3 with no replacement - a bare "
+                    "call raises NameError. Replace it with the idiomatic equivalent "
+                    "'(a > b) - (a < b)', which preserves the same -1/0/1 semantics."
+                ),
+            )
+        )
     return findings
 
 

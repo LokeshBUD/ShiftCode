@@ -10,6 +10,30 @@ Format: newest first.
 
 ---
 
+## 20. Mode A's sandbox never wrapped `__init__.py` in a package directory when the migration root itself IS the package - test imports failed identically on both interpreters
+
+**Found via:** a full regression re-run of every real library previously stress-tested this session (`docopt`, `python-slugify`, `inflection`, `jsonschema`, `purl`, `html2text`, `schedule`, `requests`), run fully unattended after this session's other changes (differential fuzzing, self-improving fixer library) to confirm nothing regressed. 6/8 matched documented results exactly; `docopt` hit already-known LLM output non-determinism (unrelated). `python-slugify` and `schedule` both newly landed on `NEEDS_REVIEW` where they'd previously reached `VERIFIED_INFERRED`.
+
+**Root cause:** both libraries are migrated by pointing `shiftcode migrate` directly at the package directory (`schedule/`, `python-slugify/`) rather than a project root containing it. `module_rel_path = file_unit.path.relative_to(effective_root)` then collapses `__init__.py`'s path to a bare `Path("__init__.py")` - real on disk, but `write_sandbox_tree` writes it unwrapped at the sandbox root. Their real test files (`test_schedule.py`, `test.py`) do `import schedule` / `from slugify import slugify`, which fails identically on both interpreters (`ModuleNotFoundError`) - correctly caught as `UNVERIFIED` by the existing vacuous-pass guard (#12), not a false pass, but real lost coverage. Not caused by anything built this session directly - confirmed via `git diff` that `orchestrator.py`'s only change (repair-history capture) is gated off by default. The actual trigger: an earlier fix this session (#17, package-name test-matching) started correctly pairing these two libraries into Mode A for the first time; Mode A never got the same package-wrapping fix Mode C got for the analogous `purl` case (#13).
+
+**A subtlety caught mid-fix:** the first fix attempt wrapped the module using the migration root's own directory name (`python-slugify`) - which fixed `schedule` (directory name happens to match its import name) but not `python-slugify` (a very common real-world mismatch: the PyPI/repo name differs from the actual importable module name - `python-slugify` ships a module literally called `slugify`). Fixed by inferring the real import name from the paired test file's own top-level imports instead of guessing from the directory name, with a small denylist for common test-tooling imports that can appear before the real one (`schedule`'s own test file does `import mock` before `import schedule`).
+
+**Fix:** `_sandbox_root_prefix`/`_infer_package_import_name` in `orchestrator.py` - detects when the migration root itself is a package, infers the real import name from real evidence (the paired test's imports), and prefixes every sandbox-relative path (the module and its whole dependency closure) accordingly. Falls back to the directory name only when no test pairing exists. Confirmed on live re-runs: both `schedule/__init__.py` and `python-slugify/__init__.py` now reach real `VERIFIED` (stronger than their original `VERIFIED_INFERRED` - real Mode A test suites run now instead of falling back to Mode C). `purl` and `requests` (already-correct multi-directory layouts) re-confirmed unaffected.
+
+---
+
+## 19. Bare `cmp(a, b)` builtin calls produced zero findings - removed in Python 3 with no fixer anywhere, so it was never caught
+
+**Found via:** the self-improving fixer library's first real graduation (`pipeline/repair_history.py` / `suggest-fixer-rules`), not external stress testing - a demonstration case, not a real third-party repo. `cmp()` was a Python 2 builtin (returns -1/0/1); Python 3 removed it entirely with no replacement, and confirmed by inspecting the vendored fixer set directly (`ls vendor/lib2to3/fixes/`) - there is no `fix_cmp`. A bare call raises `NameError` under Python 3 with zero findings to prompt a fix beforehand, same failure shape as #7's `UnicodeType` gap.
+
+**Process exercised, end to end:** a confirmed repair (before/after + a diagnosed root-cause hint) was fed to `FixerRuleAgent`, running for real against `gemini-3.5-flash-lite`. It drafted a candidate `_find_*` detector matching the real style of `_find_legacy_types_from_imports`/`_find_normalize_encode_chains` almost exactly - correct AST shape, correctly narrow (only a bare `ast.Name` call with exactly 2 args, not method calls or other arities), parsed cleanly with no manual fixes needed to the logic. Reviewed by hand, given a proper docstring, two tests added (`test_analyze.py`), merged as `_find_builtin_cmp_calls`. Confirmed firing correctly through the real pipeline entry point (`deterministic_transform` -> `find_semantic_findings`), not just in isolation.
+
+**Root cause:** a real, permanent gap in both lib2to3 and this project's own semantic-findings scanner - `cmp()` isn't a syntax construct lib2to3 fixers target, and nothing here detected it either until now.
+
+**Fix:** new `_find_builtin_cmp_calls` in `analyze.py`, registered in `find_semantic_findings`. Same posture as #7/#8 - `needs_llm=True`, detection is deterministic, the actual code fix still goes through the normal Planner/Refactorer/Auditor loop.
+
+---
+
 ## 18. `find_lib2to3_findings` had no exception handling around its own parse call - a raw lib2to3 `ParseError` crashed past `deterministic_transform`'s already-correct handling
 
 **Found via:** `kennethreitz/requests` @ `a16278e8` (first real multi-file library stress-tested after multi-file sandboxing landed). `requests/__init__.py` and `requests/packages/__init__.py` both have no trailing newline - real, legitimate content, but something lib2to3's tokenizer/parser can't handle. Both landed on `NEEDS_REVIEW` with a confusing `"unexpected error while processing this file: bad input: type=0, value='', context=('\n', (5, 0))"` message instead of the clean `DeterministicTransformError` diagnosis that already exists for exactly this failure mode.
