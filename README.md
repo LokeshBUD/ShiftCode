@@ -57,9 +57,15 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
   turned into permanent, deterministic detectors, automating the first draft
   of exactly the kind of fixer this project already adds by hand when it
   finds a new bug class. Details: `docs/self-improving-fixer-library.md`.
+- **Record/replay verification against real usage data (Mode R)** — a
+  solo-developer-feasible version of shadow testing: record real
+  `(args → result)` calls from your own Python 2 code in your own
+  environment, replay those exact real inputs against the migrated
+  candidate later, entirely offline, no live py2 interpreter needed at
+  verify time. Details: `docs/verification.md`.
 - **Provider-agnostic** — any OpenAI-compatible endpoint, config not code.
   See *Works with any LLM provider* below.
-- 242 unit tests, all passing, none of which require a real LLM or Docker.
+- 263 unit tests, all passing, none of which require a real LLM or Docker.
 
 ## How it works
 
@@ -99,6 +105,12 @@ which:
 - **`VERIFIED`** — a real, human-authored test suite (or `__main__` golden
   output) was run against both the original and migrated code, and agreed.
   The strongest tier.
+- **`VERIFIED_RECORDED`** — matched real captured usage data (Mode R): real
+  `(args → result)` pairs from the original Python 2 code actually running,
+  recorded by the user in their own environment and replayed against the
+  migrated candidate. Stronger evidence than a guessed/fuzzed input, but
+  still not a human explicitly asserting the recorded output was itself
+  correct — kept as its own distinct tier for exactly that reason.
 - **`VERIFIED_INFERRED`** — no human-authored test suite existed; ShiftCode
   auto-generated characterization tests and ran them against both
   interpreters instead. Real signal — the expected behavior always comes
@@ -155,11 +167,13 @@ with the `python:2.7` image pulled. Without one, every behavior gate
 correctly degrades to `UNVERIFIED` rather than fabricating a pass.
 
 ```bash
-pytest                                          # 242 tests, no LLM/Docker required
+pytest                                          # 263 tests, no LLM/Docker required
 shiftcode migrate <path> --dry-run              # list findings only, no LLM calls
 shiftcode migrate <path> --output-dir ./out     # full run
 shiftcode migrate <path> --characterization-fuzz-cases 50 --capture-repair-history  # opt into fuzzing + repair capture
 shiftcode suggest-fixer-rules --history .shiftcode/repair_history.jsonl --out candidate_fixers/  # offline, draft candidate detectors
+shiftcode init-recorder --out shiftcode_record.py               # copy the standalone py2-compatible recorder
+shiftcode migrate <path> --recordings-dir .shiftcode/recordings # verify against real recorded usage (Mode R)
 ```
 
 ## Validated against real code
@@ -198,9 +212,9 @@ symbol-splice fallback behavior, etc.) are in `docs/architecture.md`.
   map.
 - [`docs/agents.md`](docs/agents.md) — all six agents: what each does, where
   it lives, and why it's built the way it is; multi-provider routing.
-- [`docs/verification.md`](docs/verification.md) — Mode A/B/C mechanics,
-  differential fuzzing internals, the sandbox security model, evidence-count
-  semantics.
+- [`docs/verification.md`](docs/verification.md) — Mode A/R/B/C mechanics
+  (including record/replay), differential fuzzing internals, the sandbox
+  security model, evidence-count semantics.
 - [`docs/self-improving-fixer-library.md`](docs/self-improving-fixer-library.md) —
   the capture → draft → graduate mechanism in full, and the real feasibility
   test behind why the draft step is never auto-applied.

@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="append every diagnosed repair to repair_history_path, for later use by `suggest-fixer-rules`",
     )
+    migrate.add_argument(
+        "--recordings-dir",
+        default=None,
+        help="directory of *.jsonl recordings (see `shiftcode init-recorder`) for Mode R verification",
+    )
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--in-place", action="store_true")
     migrate.add_argument("--strict", action="store_true")
@@ -57,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     suggest.add_argument("--out", type=Path, default=Path("candidate_fixers"))
     suggest.add_argument("--model", default=None)
     suggest.add_argument("--base-url", default=None)
+
+    init_recorder = sub.add_parser(
+        "init-recorder",
+        help="copy the standalone py2-compatible call recorder into your own project (see --recordings-dir)",
+    )
+    init_recorder.add_argument("--out", type=Path, default=Path("shiftcode_record.py"))
 
     return parser
 
@@ -83,21 +94,23 @@ def _default_output_dir(path: Path) -> Path:
 
 def _write_migrated_files(report, output_dir: Path, in_place: bool) -> list[Path]:
     """VERIFIED (human-authored test suite or golden-output diff confirmed
-    it) and VERIFIED_INFERRED (LLM-inferred characterization tests confirmed
-    it - a real but lower-confidence signal, see docs) both get written out;
-    previously only VERIFIED did, silently dropping real, usable migrated
-    code for any file that only reached VERIFIED_INFERRED. VERIFIED_INFERRED
-    never overwrites the original file even under --in-place - that tier is
-    confirmed by an LLM-inferred spec, not a human-authored one, so silently
-    replacing real source with it is a meaningfully bigger risk than doing so
-    for a human-test-confirmed VERIFIED file."""
+    it), VERIFIED_RECORDED (real captured usage data confirmed it), and
+    VERIFIED_INFERRED (LLM-inferred/fuzzed characterization tests confirmed
+    it - the weakest of the three real signals, see docs) all get written
+    out; previously only VERIFIED did, silently dropping real, usable
+    migrated code for anything that only reached a weaker tier. Neither
+    VERIFIED_RECORDED nor VERIFIED_INFERRED ever overwrites the original
+    file even under --in-place - neither tier is confirmed by a
+    human-authored test, so silently replacing real source with either is a
+    meaningfully bigger risk than doing so for a human-test-confirmed
+    VERIFIED file."""
     written = []
     for f in report.files:
         if f.final_source is None:
             continue
         if f.status == Status.VERIFIED:
             target = f.path if in_place else (output_dir / f.path.name)
-        elif f.status == Status.VERIFIED_INFERRED:
+        elif f.status in (Status.VERIFIED_RECORDED, Status.VERIFIED_INFERRED):
             target = output_dir / f.path.name
         else:
             continue
@@ -176,6 +189,16 @@ def _run_suggest_fixer_rules(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_init_recorder(args: argparse.Namespace) -> int:
+    from importlib import resources
+
+    source = resources.files("shiftcode.record").joinpath("recorder.py").read_text()
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(source)
+    print(f"wrote {args.out} - copy it into your Python 2 project and `from {args.out.stem} import record`.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()  # loads .env from cwd (or nearest parent) into os.environ, if present
 
@@ -184,6 +207,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "suggest-fixer-rules":
         return _run_suggest_fixer_rules(args)
+
+    if args.command == "init-recorder":
+        return _run_init_recorder(args)
 
     if args.command != "migrate":
         parser.print_help()
@@ -202,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         cli_determinism_runs=args.determinism_runs,
         cli_characterization_fuzz_cases=args.characterization_fuzz_cases,
         cli_capture_repair_history=args.capture_repair_history,
+        cli_recordings_dir=args.recordings_dir,
     )
     if args.no_install_deps:
         config = replace(config, install_project_dependencies=False)
@@ -221,8 +248,16 @@ def main(argv: list[str] | None = None) -> int:
         (output_dir / "report.json").write_text(to_json(report))
         print(f"\nJSON report written to {output_dir / 'report.json'}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)  # VERIFIED_INFERRED files always land here, even under --in-place
+    # VERIFIED_RECORDED/VERIFIED_INFERRED files always land here, even under --in-place
+    output_dir.mkdir(parents=True, exist_ok=True)
     written = _write_migrated_files(report, output_dir, args.in_place)
+    recorded_written = [f for f in report.files if f.status == Status.VERIFIED_RECORDED and f.final_source]
+    if recorded_written:
+        print(
+            f"\n{len(recorded_written)} file(s) reached VERIFIED_RECORDED (matched real "
+            f"captured usage data, not a human-authored test) - written to {output_dir}, "
+            f"not overwritten in place, even with --in-place. Review before trusting these."
+        )
     inferred_written = [f for f in report.files if f.status == Status.VERIFIED_INFERRED and f.final_source]
     if inferred_written:
         print(

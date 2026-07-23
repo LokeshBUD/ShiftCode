@@ -23,6 +23,8 @@ from shiftcode.pipeline.verify.determinism import (
     capture_py3_script_runs,
     check_determinism,
 )
+from shiftcode.pipeline.verify.recording_gate import run_mode_r
+from shiftcode.pipeline.verify.recording_loader import RecordedCase
 from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime
 from shiftcode.pipeline.verify.syntax_gate import check_syntax
 
@@ -86,6 +88,7 @@ def verify_candidate(
     determinism_runs: int = 3,
     test_info: BehaviorTestInfo | None = None,
     characterization_info: CharacterizationInfo | None = None,
+    recorded_cases: list[RecordedCase] | None = None,
     dependency_closure: list[ClosureFile] | None = None,
     module_rel_path: Path | None = None,
 ) -> VerifyResult:
@@ -104,6 +107,21 @@ def verify_candidate(
             test_source=test_info.test_source,
             py2_runtime=py2_runtime,
             py3_runtime=py3_runtime,
+            dependency_closure=dependency_closure,
+            module_rel_path=module_rel_path,
+        )
+    elif recorded_cases and not is_test_file:
+        # Real captured usage data, when available, is checked right after
+        # the human test-suite tier (Mode A) - broader per-function real
+        # evidence than a single __main__ script's stdout diff (Mode B), and
+        # stronger than LLM-guessed/fuzzed characterization (Mode C). Needs
+        # no py2_runtime at all: the expected output was already captured
+        # live, for real, at recording time.
+        behavior = run_mode_r(
+            module_filename=module_filename,
+            module_source_py3=candidate_source_py3,
+            recorded_cases=recorded_cases,
+            py3_runtime=py3_runtime_for_c or py3_runtime,
             dependency_closure=dependency_closure,
             module_rel_path=module_rel_path,
         )
@@ -179,7 +197,8 @@ def verify_candidate(
 
 def _classify(result: VerifyResult) -> str:
     """RETRY (worth another Refactorer/Auditor pass), NEEDS_REVIEW (no amount of
-    retrying fixes an unverifiable environment), VERIFIED_INFERRED (passed only
+    retrying fixes an unverifiable environment), VERIFIED_RECORDED (passed
+    against real captured usage data - Mode R), VERIFIED_INFERRED (passed only
     auto-generated Mode C characterization tests - real signal, weaker
     confidence than a human-authored test), or VERIFIED."""
     if result.syntax and not result.syntax.passed:
@@ -190,6 +209,8 @@ def _classify(result: VerifyResult) -> str:
         return "RETRY"
     if result.behavior and result.behavior.outcome == GateOutcome.UNVERIFIED:
         return "NEEDS_REVIEW"
+    if result.behavior and result.behavior.mode == "R":
+        return "VERIFIED_RECORDED"
     if result.behavior and result.behavior.mode == "C":
         return "VERIFIED_INFERRED"
     return "VERIFIED"
@@ -208,6 +229,7 @@ def _describe_failure(result: VerifyResult) -> str:
 
 _STATUS_FOR_CLASSIFICATION = {
     "VERIFIED": Status.VERIFIED,
+    "VERIFIED_RECORDED": Status.VERIFIED_RECORDED,
     "VERIFIED_INFERRED": Status.VERIFIED_INFERRED,
 }
 
@@ -228,6 +250,7 @@ def migrate_file(
     determinism_runs: int = 3,
     test_info: BehaviorTestInfo | None = None,
     characterization_info: CharacterizationInfo | None = None,
+    recorded_cases: list[RecordedCase] | None = None,
     on_progress: Callable[[str], None] | None = None,
     dependency_closure: list[ClosureFile] | None = None,
     module_rel_path: Path | None = None,
@@ -251,6 +274,7 @@ def migrate_file(
             determinism_runs=determinism_runs,
             test_info=test_info,
             characterization_info=characterization_info,
+            recorded_cases=recorded_cases,
             dependency_closure=dependency_closure,
             module_rel_path=module_rel_path,
         )
@@ -302,6 +326,7 @@ def migrate_file(
             determinism_runs=determinism_runs,
             test_info=test_info,
             characterization_info=characterization_info,
+            recorded_cases=recorded_cases,
             dependency_closure=dependency_closure,
             module_rel_path=module_rel_path,
         )

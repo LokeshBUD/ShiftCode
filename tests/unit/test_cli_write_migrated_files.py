@@ -51,6 +51,24 @@ def test_verified_inferred_never_overwrites_in_place(tmp_path):
     assert written == [out / "m.py"]
 
 
+def test_verified_recorded_never_overwrites_in_place(tmp_path):
+    """VERIFIED_RECORDED is real captured usage data, but still not a
+    human-authored test - same posture as VERIFIED_INFERRED: always lands
+    in output_dir, never silently replaces the original file."""
+    original = tmp_path / "m.py"
+    original.write_text("print 1\n")
+
+    class _Report:
+        files = [_file(str(original), Status.VERIFIED_RECORDED)]
+
+    out = tmp_path / "out"
+    written = _write_migrated_files(_Report(), out, in_place=True)
+
+    assert original.read_text() == "print 1\n"  # untouched
+    assert (out / "m.py").read_text() == "print(1)\n"
+    assert written == [out / "m.py"]
+
+
 def test_needs_review_and_failed_are_not_written(tmp_path):
     class _Report:
         files = [

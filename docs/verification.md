@@ -11,7 +11,7 @@ is the deep reference for how those results actually get produced.
    first: `ast.parse` + `py_compile` against the candidate. Any failure goes
    straight to the repair loop with the exact error and line; nothing below
    this even runs on syntactically broken code.
-2. **Behavior gate** — Mode A, B, or C, tried in that priority order per
+2. **Behavior gate** — Mode A, R, B, or C, tried in that priority order per
    file (below).
 3. **Determinism gate** (`pipeline/verify/determinism.py`) — runs the
    candidate multiple times (default 3, `determinism_runs`), comparing
@@ -63,6 +63,86 @@ ground truth being compared against.
 local imports get resolved and mounted into the sandbox — see
 `docs/architecture.md`'s dependency-closure section for the two real gaps
 found building this out.
+
+## Mode R — real captured usage data
+
+`pipeline/verify/recording_gate.py`'s `run_mode_r`. A solo-developer-feasible
+version of shadow testing: true live shadow mode (duplicate real production
+traffic to old and new code paths, compare live) needs hosted infrastructure
+sitting inside someone else's production traffic path — real ops burden,
+real security/liability/privacy exposure, not feasible for a solo-maintained
+tool. The record/replay version instead: the user adds `shiftcode.record`'s
+`@record` decorator to their *own* Python 2 code in their *own* environment
+(dev, staging, or production — their infrastructure, their call), capturing
+real `(args → result)` pairs during normal use, then replays those exact
+real inputs against the migrated candidate later, entirely offline.
+
+**The key structural difference from every other mode: no `py2_runtime` is
+needed at all.** Since the expected output was already captured live, once,
+for real, this mode only ever executes the py3 *candidate* and compares it
+against the pre-recorded ground truth — a genuinely new capability, since
+every other mode requires a live py2 interpreter to be available.
+
+Reuses `characterization_gate.py`'s driver-script/comparison machinery
+directly (`_run_case_in`, `_values_equal`, `_module_dotted_name` — imported,
+not duplicated) via a throwaway `TestCase` wrapper around each
+`RecordedCase`; the execution/comparison mechanics are identical to Mode C,
+only where the "expected" side comes from differs.
+
+**The recorder itself** (`src/shiftcode/record/recorder.py`, copied
+verbatim into a user's project via `shiftcode init-recorder`) is
+deliberately stdlib-only and zero-dependency on the `shiftcode` package,
+since it runs *inside the user's own Python 2 process* — confirmed to
+actually compile and run under real Python 2 (not just written to look
+compatible). Never lets recording break the function it wraps: the real
+call always happens and its real result/exception is always
+returned/raised regardless of whether recording succeeds; a
+non-JSON-serializable arg/result is silently skipped, not an error. Bounded
+per function (`max_entries`, default 200) — stops recording once the cap is
+hit rather than growing forever in a long-running process.
+
+**A real UX nuance found while validating this end-to-end:** applying
+`@record` directly to a function *inside* the module being migrated means
+the migrated candidate would carry a `from shiftcode_record import record`
+import the verification sandbox doesn't have - a real `ImportError` at
+verify time. The validated, recommended pattern instead wraps at the call
+site from a separate recording harness (`add = record(calc.add)`), leaving
+the module being migrated untouched:
+
+```python
+# record_harness.py - NOT part of the module being migrated
+import calc
+from shiftcode_record import record
+
+add = record(calc.add)
+add(2, 3)  # a real call, captured
+```
+
+**Loading + safety** (`pipeline/verify/recording_loader.py`'s
+`load_recordings`): a recording file is an external input — possibly
+produced on an entirely different machine, at an earlier time — so it gets
+the exact same zero-trust posture as LLM output, not a lesser one. Every
+`args`/`result` gets converted to a literal string and validated through
+the same `ast.literal_eval`-only gate (`fuzz_generation.py`'s
+`validate_args_literal`/`validate_seed_literal`, reused directly) everything
+else in this codebase uses. `function_name` is additionally validated
+against a plain identifier pattern before it's ever allowed near a driver
+script — recordings are a new *class* of untrusted input this codebase
+didn't have before (an LLM's response is at least schema-constrained by the
+provider; a JSONL file on disk isn't), so this path doesn't inherit the
+(undefended) assumption the existing `TestCase.function_name` path makes
+that a function name is always safe by construction. Unsafe/malformed
+entries are dropped individually, never failing the whole recording file.
+v1 scope is positional-only, matching `TestCase.args_literal`'s own
+contract — a recorded call that used keyword arguments is dropped, not
+guessed at, since no established literal representation for kwargs exists
+anywhere else in this codebase yet.
+
+**Where Mode R sits in the priority chain:** Mode A → Mode R → Mode B →
+Mode C. Real per-function recorded data, when available, is likely broader
+evidence than a single `__main__` script's stdout diff (Mode B) or an
+LLM-guessed/fuzzed characterization case (Mode C) — checked right after the
+human test-suite tier.
 
 ## Mode B — no test suite, but runnable
 
@@ -182,6 +262,9 @@ measure the same thing:
 - **Mode A:** `cases_run` = the real `pytest`-discovered test count;
   `cases_passed` = that minus however many outcome mismatches were found.
   `None` on either vacuous-pass guard above — nothing real ran.
+- **Mode R:** `cases_run` = the number of real recorded calls replayed;
+  `cases_passed` accordingly. `None` when no recordings matched this file's
+  functions at all.
 - **Mode C:** `cases_run` = the *true* total executed, including any
   neighbor-variant shrinking probes (not just the originally-proposed case
   count); `cases_passed` accordingly. `None` when there were no valid cases

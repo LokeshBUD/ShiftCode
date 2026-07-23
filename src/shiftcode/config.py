@@ -54,6 +54,12 @@ class ShiftConfig:
     # detectors from. Pure serialization, zero LLM/Docker cost either way.
     capture_repair_history: bool = False
     repair_history_path: str = ".shiftcode/repair_history.jsonl"
+    # Off by default (opt-in): a directory of *.jsonl files produced by
+    # shiftcode.record.recorder's @record decorator, run against the user's
+    # OWN Python 2 code in their OWN environment (see docs/verification.md's
+    # Mode R section). None means Mode R never engages, byte-for-byte
+    # unchanged behavior from before this existed.
+    recordings_dir: str | None = None
 
     def llm_for(self, role: str) -> LLMConfig:
         return self.agent_overrides.get(role, self.llm)
@@ -120,6 +126,7 @@ def load_config(
     cli_determinism_runs: int | None = None,
     cli_characterization_fuzz_cases: int | None = None,
     cli_capture_repair_history: bool | None = None,
+    cli_recordings_dir: str | None = None,
 ) -> ShiftConfig:
     """Resolve config with precedence: CLI args > env vars > pyproject.toml [tool.shiftcode] > defaults."""
     table = _load_pyproject_table(project_root)
@@ -163,6 +170,7 @@ def load_config(
         else table.get("capture_repair_history", False)
     )
     repair_history_path = table.get("repair_history_path", ".shiftcode/repair_history.jsonl")
+    recordings_dir = cli_recordings_dir or table.get("recordings_dir")
 
     return ShiftConfig(
         llm=llm,
@@ -179,4 +187,5 @@ def load_config(
         characterization_fuzz_cases=characterization_fuzz_cases,
         capture_repair_history=capture_repair_history,
         repair_history_path=repair_history_path,
+        recordings_dir=recordings_dir,
     )

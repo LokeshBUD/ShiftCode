@@ -8,6 +8,7 @@ def test_defaults(tmp_path):
     assert cfg.characterization_fuzz_cases == 0  # off by default - additive/opt-in feature
     assert cfg.capture_repair_history is False
     assert cfg.repair_history_path == ".shiftcode/repair_history.jsonl"
+    assert cfg.recordings_dir is None
 
 
 def test_env_overrides_defaults(monkeypatch, tmp_path):
@@ -93,3 +94,17 @@ repair_history_path = "custom/history.jsonl"
 
     cfg_cli_off = load_config(project_root=tmp_path, cli_capture_repair_history=False)
     assert cfg_cli_off.capture_repair_history is False  # explicit CLI override wins over pyproject
+
+
+def test_recordings_dir_from_pyproject_and_cli_override(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[tool.shiftcode]
+recordings_dir = "my_recordings"
+"""
+    )
+    cfg = load_config(project_root=tmp_path)
+    assert cfg.recordings_dir == "my_recordings"
+
+    cfg_cli = load_config(project_root=tmp_path, cli_recordings_dir="other_recordings")
+    assert cfg_cli.recordings_dir == "other_recordings"  # explicit CLI override wins over pyproject

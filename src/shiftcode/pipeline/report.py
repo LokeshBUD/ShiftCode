@@ -72,6 +72,7 @@ def to_json(report: MigrationReport) -> str:
 
 _STATUS_COLOR = {
     "VERIFIED": "32",  # green
+    "VERIFIED_RECORDED": "34",  # blue - real captured usage data, see Status docstring
     "VERIFIED_INFERRED": "36",  # cyan - real but weaker evidence, see Status docstring
     "NEEDS_REVIEW": "33",  # yellow
     "FAILED": "31",  # red

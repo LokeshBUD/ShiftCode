@@ -38,6 +38,7 @@ from shiftcode.pipeline.verify.dependency_provisioning import (
     provision_dependencies,
 )
 from shiftcode.pipeline.verify.fuzz_generation import expand_function_seeds
+from shiftcode.pipeline.verify.recording_loader import RecordedCase, load_recordings
 from shiftcode.pipeline.verify.sandbox_runtime import ExecutionRuntimes, resolve_execution_runtimes
 
 
@@ -471,6 +472,7 @@ def _process_file_phase_b(
     characterization_info: CharacterizationInfo | None,
     dependency_closure: list[ClosureFile],
     module_rel_path: Path,
+    recorded_cases: list[RecordedCase] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> None:
     """Refactorer<->Auditor<->verify repair loop, closure-aware (dependencies.py) -
@@ -488,6 +490,7 @@ def _process_file_phase_b(
         determinism_runs=determinism_runs,
         test_info=test_info,
         characterization_info=characterization_info,
+        recorded_cases=recorded_cases,
         dependency_closure=dependency_closure,
         module_rel_path=module_rel_path,
         on_progress=(lambda msg, fu=file_unit: _emit(on_progress, fu, msg)) if on_progress else None,
@@ -509,6 +512,7 @@ def _process_file(
     determinism_runs: int,
     test_info: BehaviorTestInfo | None,
     characterization_fuzz_cases: int = 0,
+    recorded_cases: list[RecordedCase] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> None:
     """Thin single-file convenience wrapper (Phase A then Phase B for one
@@ -537,6 +541,7 @@ def _process_file(
         determinism_runs=determinism_runs,
         test_info=test_info,
         characterization_info=characterization_info,
+        recorded_cases=recorded_cases,
         dependency_closure=[],
         module_rel_path=Path(file_unit.path.name),
         on_progress=on_progress,
@@ -611,6 +616,14 @@ def run_migration(
     test_pairs = _discover_test_pairs(file_units)
     total = len(file_units)
     characterization_infos: dict[Path, CharacterizationInfo] = {}
+
+    # Off by default (config.recordings_dir is None). Loaded once, keyed by
+    # function name - matched to whichever file actually defines that
+    # top-level function during Phase B, same discovery
+    # (top_level_function_defs) Mode C already uses.
+    recordings_by_function: dict[str, list[RecordedCase]] = (
+        load_recordings(Path(config.recordings_dir)) if config.recordings_dir else {}
+    )
 
     # When the migration root itself IS a package (its own __init__.py sits
     # directly in it, not inside a subdirectory - e.g. `shiftcode migrate
@@ -692,6 +705,15 @@ def run_migration(
             if sandbox_root_prefix is not None:
                 module_rel_path = sandbox_root_prefix / module_rel_path
                 closure = [replace(cf, rel_path=sandbox_root_prefix / cf.rel_path) for cf in closure]
+            recorded_cases = None
+            if recordings_by_function:
+                own_function_names = {fn.name for fn in top_level_function_defs(file_unit.original_source)}
+                matched = [
+                    case
+                    for name in own_function_names
+                    for case in recordings_by_function.get(name, [])
+                ]
+                recorded_cases = matched or None
             try:
                 _process_file_phase_b(
                     file_unit,
@@ -702,6 +724,7 @@ def run_migration(
                     determinism_runs=config.determinism_runs,
                     test_info=test_info,
                     characterization_info=characterization_infos.get(file_unit.path),
+                    recorded_cases=recorded_cases,
                     dependency_closure=closure,
                     module_rel_path=module_rel_path,
                     on_progress=on_progress,
