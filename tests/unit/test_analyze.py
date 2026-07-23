@@ -144,3 +144,45 @@ def test_find_semantic_findings_ignores_unrelated_getargspec_calls():
     source = "def f(x):\n    return x.getargspec()\n\ndef g():\n    return foo.getargspec(1)\n"
     findings, _ = find_semantic_findings(source)
     assert not any(f.construct_name == "inspect_getargspec_call" for f in findings)
+
+
+def test_find_semantic_findings_detects_dunder_cmp_definition():
+    """Regression from a real stress test (docs/bug-log.md #25): jek/blinker's
+    _saferef.py defines __cmp__, which Python 3 silently never calls (no
+    error) - a more dangerous case than bare cmp() calls."""
+    source = "class Ref(object):\n    def __cmp__(self, other):\n        return cmp(self.key, other.key)\n"
+    findings, _ = find_semantic_findings(source)
+
+    matches = [f for f in findings if f.construct_name == "dunder_cmp_definition"]
+    assert len(matches) == 1
+    assert matches[0].needs_llm is True
+    assert matches[0].line == 2
+    assert "__eq__" in matches[0].detail
+    assert "__hash__" in matches[0].detail
+
+
+def test_find_semantic_findings_ignores_unrelated_method_definitions():
+    source = "class Ref(object):\n    def __cmp2__(self, other):\n        return 0\n\n    def compare(self, other):\n        return 0\n"
+    findings, _ = find_semantic_findings(source)
+    assert not any(f.construct_name == "dunder_cmp_definition" for f in findings)
+
+
+def test_find_semantic_findings_detects_pipes_module_import():
+    """Regression from a real stress test (docs/bug-log.md #27):
+    kislyuk/argcomplete's __init__.py imports 'pipes' as part of a
+    multi-name import statement - removed in Python 3.13, no lib2to3
+    fixer exists, and importing it crashes the whole module."""
+    source = "import os, sys, pipes, shlex\n"
+    findings, _ = find_semantic_findings(source)
+
+    matches = [f for f in findings if f.construct_name == "pipes_module_import"]
+    assert len(matches) == 1
+    assert matches[0].needs_llm is True
+    assert matches[0].line == 1
+    assert "shlex.quote" in matches[0].detail
+
+
+def test_find_semantic_findings_ignores_unrelated_imports():
+    source = "import os, sys, shlex\nfrom pipes_utils import helper\n"
+    findings, _ = find_semantic_findings(source)
+    assert not any(f.construct_name == "pipes_module_import" for f in findings)

@@ -10,6 +10,50 @@ Format: newest first.
 
 ---
 
+## 27. `import pipes` produced zero findings - removed in Python 3.13 with no fixer anywhere, crashing the whole module's import
+
+**Found via:** `kislyuk/argcomplete` @ `f6a7bf4`, same run as #26. Once #26's test-pairing fix routed `argcomplete/__init__.py` to real Mode A, it hit `ModuleNotFoundError: No module named 'pipes'` during test collection - the module imports `pipes` as part of a multi-name `import` statement, crashing the ENTIRE module's import (not just wherever `pipes` is used), the same "one missing symbol takes down everything" failure shape as bug #7's `types.UnicodeType`.
+
+**Root cause:** `pipes` (shell-command utilities) was deprecated in Python 3.11 and removed entirely in 3.13 - a stdlib module removal, not a syntax difference, so `lib2to3` was never going to have a fixer for it (confirmed: no reference anywhere in the vendored fixer set), and this project's own scanner had no detection for it either.
+
+**A real, separate finding while diagnosing this:** the only two real references to `pipes.quote(...)` in this specific file are both inside commented-out code - the import itself was genuinely dead weight here, not a case needing the `shlex.quote` replacement. The new detector's guidance covers both cases (replace `pipes.quote` with `shlex.quote` if actually used; just remove the import if not), since a detector can't assume which applies without a human/LLM reading the specific file.
+
+**A real Auditor misdiagnosis observed during repair, left unfixed (LLM judgment limitation, not a code defect):** the Refactorer's first attempt correctly removed the dead `pipes` import per the new finding's guidance, surfacing a genuinely separate, real test failure. The Auditor then misread that failure and told the Refactorer to "restore the pipes import" - which re-introduced the exact `ModuleNotFoundError` this fix targets, and the repair loop exhausted its budget stuck on that mistaken hint. `NEEDS_REVIEW` is the correct, honest outcome here (same category as `docopt`'s documented LLM non-determinism, entry 1) - not something a code-level fix addresses; this is a diagnosis-quality question, not a ShiftCode gap.
+
+**Fix:** new `_find_pipes_module_imports` in `analyze.py`, registered in `find_semantic_findings`. Same posture as #7/#23 - `needs_llm=True`, detection is deterministic and complete regardless of the repair loop's eventual success on any specific file.
+
+---
+
+## 26. Non-package modules never checked a sibling `test/` (singular) directory, only `tests/` (plural)
+
+**Found via:** same `kislyuk/argcomplete` run as #27. `argcomplete/__init__.py` has a real, substantive 43-line test suite (`test/test.py`, testing the whole package via `from argcomplete import *`) that was never paired for Mode A at all - the directory is named `test` (singular), and every sibling-tests-directory candidate added by bug #24's fix only ever checked `tests` (plural).
+
+**Root cause:** the directory-naming axis was never generalized - bug #9 already fixed the equivalent *filename* variance (`tests.py` vs `test.py`), but the *directory name* variance (`tests/` vs `test/`) was a separate, un-covered axis until this run surfaced a real case of it.
+
+**Fix:** `_discover_test_pairs` (`orchestrator.py`) now tries both `tests` and `test` as the sibling-directory name everywhere a directory-based candidate is built (`_TEST_DIR_NAMES = ("tests", "test")`), for both the package (`__init__.py`) and non-package candidate paths. Confirmed live: `argcomplete/__init__.py` now correctly routes to Mode A (previously fell through to Mode C/nothing).
+
+---
+
+## 25. Classes defining `__cmp__` produced zero findings - Python 3 silently never calls it, more dangerous than bare `cmp()` calls
+
+**Found via:** `jek/blinker` @ `c06a79a`, same run as #24. Once #24's test-pairing fix routed `_saferef.py` to real Mode A, it hit a genuine `FAIL`: `_saferef.py` defines `__cmp__` (Python 2's single-method comparison protocol). Confirmed via the real Refactorer/Auditor loop: the Auditor only diagnosed the full scope of the real fix (rewrite as `__eq__`/`__lt__`, not just fix the bare `cmp()` calls inside `__cmp__`'s own body) reactively, on the third and final attempt - and even then, the Refactorer exhausted all 3 attempts without a correct fix. `NEEDS_REVIEW` is the honest, correct outcome for a genuinely hard rewrite (must also preserve `__hash__`, since Python 3 sets it to `None` automatically on any class defining `__eq__` without it - confirmed real, `test_ShortCircuit` uses instances as dict keys) - not every `needs_llm=True` finding is expected to auto-resolve within the repair budget.
+
+**Root cause:** a stdlib/language protocol removal with no exception raised at all (Python 3 doesn't error on a `__cmp__`-only class - comparisons just silently fall back to identity, or raise a generic `TypeError` depending what's attempted) - a real, more dangerous case than bare `cmp()` calls (#19), and no `lib2to3` fixer exists for it either.
+
+**Fix:** new `_find_dunder_cmp_definitions` in `analyze.py`, registered in `find_semantic_findings` - flags `def __cmp__(...)` upfront with a complete finding (rich-comparison methods needed, plus the `__hash__` preservation trap), so the Planner gets the full scope from the start instead of the Auditor discovering it late, one wasted repair attempt at a time. Doesn't guarantee the fix succeeds (that's a real LLM-capability question, out of scope for a detector), but meaningfully improves the diagnostic signal quality regardless of outcome.
+
+---
+
+## 24. Non-package modules never checked a sibling top-level `tests/` directory, or a private module's underscore-stripped test-file name
+
+**Found via:** same `jek/blinker` run as #25. `blinker/_saferef.py` and `blinker/_utilities.py` both have real, substantive test files (`tests/test_saferef.py`, 117 lines; `tests/test_utilities.py`) - but neither got paired for Mode A at all, silently falling back to Mode C (weaker evidence) or nothing.
+
+**Root cause:** `_discover_test_pairs`'s non-`__init__.py` candidate list only ever checked inside the module's own directory (`test_<name>.py`, `tests/test_<name>.py`) - the sibling-top-level-`tests/`-directory candidate (already added for `__init__.py` files, bug #17) was never generalized to arbitrary modules. Separately, the candidate filename was always the module's literal basename - a private module's test file conventionally drops the leading underscore (`test_saferef.py`, not `test__saferef.py`, for `_saferef.py`), which the candidate list never tried.
+
+**Fix:** `_discover_test_pairs` (`orchestrator.py`) now also checks `<module's parent's parent>/tests/test_<name>.py` for every module (not just packages), and tries both the module's exact basename and, for single-leading-underscore names, the stripped variant (`__dunder__`-style names are explicitly excluded from stripping). Confirmed live: `_saferef.py` and `_utilities.py` both now correctly route to Mode A; `_utilities.py` reached real `VERIFIED` (2/2) as a direct result, upgraded from its previous `VERIFIED_INFERRED`-via-fuzzing result.
+
+---
+
 ## 23. `inspect.getargspec(...)` produced zero findings - removed in Python 3.11 with no fixer anywhere, so it was never caught
 
 **Found via:** `pytoolz/toolz` @ `498fefa`, same run as #21/#22. Once those two dependency-closure fixes let `toolz/curried.py`'s real test suite actually run, it failed for a genuine, different reason: `curried.py` uses `inspect.getargspec(f).args` to inspect a function's arity, which raises `AttributeError: module 'inspect' has no attribute 'getargspec'` on this Python 3 (removed in 3.11) - confirmed via `grep` across the vendored fixer set that no `lib2to3` fixer references it, and this project's own semantic-findings scanner had no detection for it either, same shape as #7 and #19.

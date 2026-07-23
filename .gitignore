@@ -7,3 +7,4 @@ dist/
 src/shiftcode/vendor/lib2to3/*.pickle
 .pytest_cache/
 .env
+.shiftcode/

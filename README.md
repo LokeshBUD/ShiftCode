@@ -51,7 +51,7 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
   draft* of exactly the kind of hand-written fixer this project already adds
   by hand when it finds a new bug class. See *Self-improving fixer library*
   below.
-- 233 unit tests, all passing, none of which require a real LLM or Docker
+- 242 unit tests, all passing, none of which require a real LLM or Docker
   (they run against a scripted stand-in provider/runtime).
 
 ## How it works
@@ -338,7 +338,7 @@ the `python:2.7` image pulled. Without one, every behavior gate correctly
 degrades to `UNVERIFIED` rather than fabricating a pass.
 
 ```bash
-pytest                                          # 233 tests, no LLM/Docker required
+pytest                                          # 242 tests, no LLM/Docker required
 shiftcode migrate <path> --dry-run              # list findings only, no LLM calls
 shiftcode migrate <path> --output-dir ./out     # full run
 shiftcode migrate <path> --characterization-fuzz-cases 50 --capture-repair-history  # opt into fuzzing + repair capture
@@ -355,6 +355,9 @@ crashed/blocked runs too, not just wins.
 
 | # | Library | Pair | Outcome | Status |
 |---|---------|------|---------|--------|
+| 13 | [`argcomplete`](https://github.com/kislyuk/argcomplete) | py2→py3 | third library scouted specifically to stress differential fuzzing/confidence counts on genuinely unseen code; found and fixed a directory-naming test-pairing gap (`test/` singular vs `tests/` plural) and a removed-stdlib-module gap (`pipes`, gone in Python 3.13); landed `NEEDS_REVIEW` on a real, observed Auditor misdiagnosis (LLM judgment limitation, not a code defect) | complete |
+| 12 | [`blinker`](https://github.com/jek/blinker) | py2→py3 | second library scouted the same way; `_utilities.py` upgraded from `VERIFIED_INFERRED` to real `VERIFIED` once a test-pairing gap was fixed; `_saferef.py` correctly landed `NEEDS_REVIEW` on a genuinely hard `__cmp__`→rich-comparison rewrite, now with much clearer upfront diagnosis | complete |
+| 11 | [`toolz`](https://github.com/pytoolz/toolz) | py2→py3 | first library scouted specifically to stress differential fuzzing/confidence counts on genuinely unseen code; found and fixed two real dependency-closure gaps and a missing `inspect.getargspec` detector; 5 files went from 0 verified to real `VERIFIED` | complete |
 | 10 | full corpus regression re-run | py2→py3 | re-ran all 8 previously-tested libraries fully unattended after this session's other work, to confirm nothing regressed. 6/8 matched exactly, 1 hit known LLM flakiness, 2 (`python-slugify`, `schedule`) found a real bug — fixed, both now upgraded to real `VERIFIED` | complete |
 | 9 | [`requests`](https://github.com/kennethreitz/requests) | py2→py3 | first real multi-file library stress-tested; `requests/core.py` and a nested vendored submodule reach `VERIFIED_INFERRED`; `requests/__init__.py` reaches real Mode A (its own test suite correctly fails on live network calls, blocked by the sandbox's own `--network none` isolation — not a bug) | complete |
 | 8 | [`purl`](https://github.com/codeinthehole/purl) (re-validated, real nested layout) | py2→py3 | `purl/__init__.py` reaches genuine real `VERIFIED` via Mode A — real multi-file dependency-aware sandboxing closes the original false-`VERIFIED` bug for good | complete |
@@ -366,7 +369,7 @@ crashed/blocked runs too, not just wins.
 | 2 | [`python-slugify`](https://github.com/un33k/python-slugify) | py2→py3 | `__init__.py` reaches real `VERIFIED` — its own test suite runs and passes for real (upgraded from an initial `VERIFIED_INFERRED` once entry 10's sandbox-wrapping fix landed) | complete |
 | 1 | [`docopt`](https://github.com/docopt/docopt) | py2→py3 | real corruption bug found *and correctly fixed*; `docopt.py` reaches real `VERIFIED` end-to-end | complete — first file to reach real `VERIFIED` on real historical code |
 
-Ten runs, all fully resolved with no open blockers. `purl`'s original
+Thirteen runs, all fully resolved with no open blockers. `purl`'s original
 false-`VERIFIED` finding (`docs/bug-log.md` #13) turned out to need real
 multi-file dependency-aware sandboxing to close for good, not just a narrow
 special case — built and confirmed via a purpose-built fixture
@@ -417,15 +420,25 @@ Full detail: `docs/stress-test-log.md`. The process every run follows:
 `docs/bug-log.md` tracks real bugs found in ShiftCode itself — mostly via
 stress-testing against real external code, not the bundled fixtures — with
 root cause and what now catches that class of bug going forward (a fix, a
-new gate, or a new agent). 20 entries so far. The two newest were found a
-different way each: #20 via a full unattended regression re-run of the whole
-real-library corpus after this session's other changes (a real sandbox gap
-that only showed up once an earlier fix — package-name test-matching — started
-routing two libraries into Mode A for the first time; both now reach real
-`VERIFIED`, stronger than before); #19 via the self-improving fixer library's
-first real graduation — a candidate detector for Python 2's removed `cmp()`
-builtin, drafted by `FixerRuleAgent` against a real confirmed repair, reviewed
-and merged by hand. The other 18, all found via genuine
+new gate, or a new agent). 27 entries so far. Entries #21–#27 came from
+scouting three genuinely new, previously-untested real libraries
+(`pytoolz/toolz`, `jek/blinker`, `kislyuk/argcomplete`) specifically to stress
+differential fuzzing and the confidence-count fields on unseen code: two
+dependency-closure gaps (an ancestor package `__init__.py`'s own real imports
+never traced; a paired test file's own local imports never included in the
+sandbox at all — the second one caught a real bug in its own fix before it
+shipped, via the regression test written for it), three new semantic-findings
+detectors (`inspect.getargspec`, removed in 3.11; `__cmp__` method
+definitions, silently never called under Python 3; `import pipes`, removed in
+3.13), and a directory-naming test-pairing gap (`test/` singular vs `tests/`
+plural, the same axis as an earlier filename-naming fix). #20 came from a
+full unattended regression re-run of the whole earlier real-library corpus (a
+real sandbox gap that only showed up once an earlier fix — package-name
+test-matching — started routing two libraries into Mode A for the first
+time); #19 via the self-improving fixer library's first real graduation — a
+candidate detector for Python 2's removed `cmp()` builtin, drafted by
+`FixerRuleAgent` against a real confirmed repair, reviewed and merged by
+hand. The other 18, all found via genuine
 stress testing against real libraries: two vendored-fixer/gate bugs on `docopt`
 (shadowed-identifier corruption, vacuous Mode A pass), a crash-isolation bug
 and a diagnostic-clarity gap on `python-slugify`, a sandbox-dependency

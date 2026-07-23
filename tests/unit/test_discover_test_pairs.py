@@ -85,6 +85,71 @@ def test_no_match_when_nothing_present(tmp_path):
     assert _discover_test_pairs([m]) == {}
 
 
+def test_non_package_module_matches_test_in_sibling_tests_directory(tmp_path):
+    """Real, common shape confirmed on `jek/blinker`: `blinker/_saferef.py`
+    (a non-package module) is tested by a project-root `tests/test_saferef.py`
+    - a sibling tests/ directory one level ABOVE the module's own directory,
+    same principle as the __init__.py-specific sibling-tests-dir case below
+    but generalized to any module, not just packages (docs/bug-log.md #24)."""
+    module = _fu(tmp_path / "blinker" / "_saferef.py")
+    (tmp_path / "tests").mkdir()
+    _fu(tmp_path / "tests" / "test_saferef.py")
+
+    pairs = _discover_test_pairs([module])
+
+    assert module.path in pairs
+    assert pairs[module.path].test_filename == "test_saferef.py"
+
+
+def test_leading_underscore_module_also_matches_without_the_underscore_same_dir(tmp_path):
+    module = _fu(tmp_path / "_utilities.py")
+    _fu(tmp_path / "test_utilities.py")
+
+    pairs = _discover_test_pairs([module])
+
+    assert module.path in pairs
+    assert pairs[module.path].test_filename == "test_utilities.py"
+
+
+def test_dunder_module_does_not_get_underscore_stripped(tmp_path):
+    """__main__.py-style dunder names must not have a single leading
+    underscore stripped (that would garble the name, not simplify it) -
+    only a real single-underscore "private module" convention qualifies."""
+    module = _fu(tmp_path / "__main__.py")
+    _fu(tmp_path / "test_main__.py")  # would only match if strip logic were wrong
+
+    pairs = _discover_test_pairs([module])
+
+    assert module.path not in pairs
+
+
+def test_package_init_matches_generic_test_py_in_singular_test_directory(tmp_path):
+    """Real shape confirmed on `kislyuk/argcomplete`: a project-root `test/`
+    directory (SINGULAR, not "tests") containing a generically-named
+    test.py that tests the whole package via `from argcomplete import *` -
+    docs/bug-log.md #26. Same axis of naming variance as bug #9's
+    tests.py/test.py filename fix, one level up on the directory name."""
+    init = _fu(tmp_path / "argcomplete" / "__init__.py")
+    (tmp_path / "test").mkdir()
+    _fu(tmp_path / "test" / "test.py")
+
+    pairs = _discover_test_pairs([init])
+
+    assert init.path in pairs
+    assert pairs[init.path].test_filename == "test.py"
+
+
+def test_non_package_module_matches_test_in_singular_test_directory(tmp_path):
+    module = _fu(tmp_path / "pkg" / "_utils.py")
+    (tmp_path / "test").mkdir()
+    _fu(tmp_path / "test" / "test_utils.py")
+
+    pairs = _discover_test_pairs([module])
+
+    assert module.path in pairs
+    assert pairs[module.path].test_filename == "test_utils.py"
+
+
 def test_package_init_matches_test_named_after_package_directory(tmp_path):
     """Real, common convention: mypkg/tests/test_mypkg.py for
     mypkg/__init__.py - named after the package (parent directory), not

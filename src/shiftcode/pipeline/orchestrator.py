@@ -54,6 +54,14 @@ def _emit(on_progress: Callable[[str], None] | None, file_unit: FileUnit, msg: s
 _NON_MODULE_FILENAMES = {"setup.py", "conf.py"}
 
 
+# Both real, common directory-naming conventions for a project's test
+# directory - "tests" (plural) and "test" (singular). Same axis of naming
+# variance as bug #9's file-naming fix (tests.py vs test.py), just on the
+# directory name instead - confirmed real via `kislyuk/argcomplete`'s
+# `test/test.py` (singular), docs/bug-log.md #26.
+_TEST_DIR_NAMES = ("tests", "test")
+
+
 def _discover_test_pairs(file_units: list[FileUnit]) -> dict[Path, BehaviorTestInfo]:
     by_dir: dict[Path, list[FileUnit]] = {}
     for fu in file_units:
@@ -63,10 +71,29 @@ def _discover_test_pairs(file_units: list[FileUnit]) -> dict[Path, BehaviorTestI
     for fu in file_units:
         if is_test_filename(fu.path.name):
             continue
-        candidates = [
-            fu.path.parent / f"test_{fu.path.name}",
-            fu.path.parent / "tests" / f"test_{fu.path.name}",
-        ]
+        # Real names to try for a non-package module: its own basename, and
+        # (a real, common Python convention - a "private" module's test file
+        # usually drops the leading underscore, e.g. blinker's own
+        # `_saferef.py` is tested by `test_saferef.py`, not
+        # `test__saferef.py`) the same basename with one leading underscore
+        # stripped, if it has one.
+        module_stem = fu.path.stem
+        candidate_stems = [module_stem]
+        if module_stem.startswith("_") and not module_stem.startswith("__"):
+            candidate_stems.append(module_stem[1:])
+
+        candidates = []
+        for stem in candidate_stems:
+            candidates.append(fu.path.parent / f"test_{stem}.py")
+            for test_dir in _TEST_DIR_NAMES:
+                candidates.append(fu.path.parent / test_dir / f"test_{stem}.py")
+                # A sibling top-level tests/ (or test/) directory, one level
+                # above the module's own directory - real shape, found via
+                # blinker: `blinker/_saferef.py` tested by a project-root
+                # `tests/test_saferef.py`, not nested inside `blinker/`
+                # itself. Same principle as the __init__.py-specific case
+                # below (docs/bug-log.md #17), generalized to any module.
+                candidates.append(fu.path.parent.parent / test_dir / f"test_{stem}.py")
         if fu.path.name == "__init__.py":
             # A package's test file is very commonly named after the
             # PACKAGE (its directory name), not literally "__init__" - real
@@ -79,17 +106,19 @@ def _discover_test_pairs(file_units: list[FileUnit]) -> dict[Path, BehaviorTestI
             # artifact of this session's own flat single-directory
             # stress-test extraction, not a real gap.
             pkg_name = fu.path.parent.name
-            candidates += [
-                fu.path.parent / f"test_{pkg_name}.py",
-                fu.path.parent / "tests" / f"test_{pkg_name}.py",
-                fu.path.parent.parent / f"test_{pkg_name}.py",
-                fu.path.parent.parent / "tests" / f"test_{pkg_name}.py",
+            candidates.append(fu.path.parent / f"test_{pkg_name}.py")
+            candidates.append(fu.path.parent.parent / f"test_{pkg_name}.py")
+            for test_dir in _TEST_DIR_NAMES:
+                candidates.append(fu.path.parent / test_dir / f"test_{pkg_name}.py")
+                candidates.append(fu.path.parent.parent / test_dir / f"test_{pkg_name}.py")
                 # purl's exact real (un-flattened) shape: a sibling tests/
                 # directory containing a GENERICALLY-named tests.py/test.py,
-                # not package-named - docs/bug-log.md #17.
-                fu.path.parent.parent / "tests" / "tests.py",
-                fu.path.parent.parent / "tests" / "test.py",
-            ]
+                # not package-named - docs/bug-log.md #17. argcomplete's real
+                # shape is the singular-directory variant of the same thing:
+                # test/test.py, testing the whole package via `from
+                # argcomplete import *` - docs/bug-log.md #26.
+                candidates.append(fu.path.parent.parent / test_dir / "tests.py")
+                candidates.append(fu.path.parent.parent / test_dir / "test.py")
         matched = next((c for c in candidates if c.is_file()), None)
 
         if matched is None:

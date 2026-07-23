@@ -128,6 +128,8 @@ def find_semantic_findings(
     findings.extend(_find_normalize_encode_chains(tree))
     findings.extend(_find_builtin_cmp_calls(tree))
     findings.extend(_find_inspect_getargspec_calls(tree))
+    findings.extend(_find_dunder_cmp_definitions(tree))
+    findings.extend(_find_pipes_module_imports(tree))
 
     return findings, slices
 
@@ -292,6 +294,89 @@ def _find_inspect_getargspec_calls(tree: ast.Module) -> list[Py2Finding]:
                 ),
             )
         )
+    return findings
+
+
+def _find_dunder_cmp_definitions(tree: ast.Module) -> list[Py2Finding]:
+    """`__cmp__` was Python 2's single-method comparison protocol - Python 3
+    dropped it entirely in favor of rich comparison (`__eq__`, `__lt__`,
+    etc.) and, critically, does NOT raise or warn when a class only defines
+    `__cmp__`: comparisons on that class just silently fall back to identity
+    (or raise a generic TypeError on `<`/`>`), with zero indication the
+    class's own comparison logic was ever supposed to run. No lib2to3 fixer
+    exists for this (confirmed: no reference to `__cmp__` anywhere in the
+    vendored fixer set) - a real, more dangerous case than bare `cmp()`
+    calls (docs/bug-log.md #19), which at least raise NameError loudly.
+    Found via a real stress test (docs/bug-log.md #25): `jek/blinker`'s
+    `_saferef.py` defines `__cmp__` (itself calling bare `cmp()` internally,
+    caught separately by #19's detector) - the Refactorer only discovered
+    the full scope of the real fix needed (rewrite as `__eq__`/`__lt__`,
+    not just fix the internal cmp() calls) reactively, after failing
+    verification, and still exhausted all repair attempts. This detector
+    flags the dunder definition itself upfront, so the Planner gets the
+    complete picture from the start instead of discovering it late."""
+    findings: list[Py2Finding] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__cmp__"):
+            continue
+        findings.append(
+            Py2Finding(
+                construct_name="dunder_cmp_definition",
+                line=node.lineno,
+                col=node.col_offset,
+                fixer_name=None,
+                needs_llm=True,
+                detail=(
+                    "'__cmp__' was Python 2's comparison protocol, dropped entirely in "
+                    "Python 3 - it is silently never called there (no error), not just "
+                    "deprecated. Replace it with rich comparison methods: '__eq__' and "
+                    "'__lt__' at minimum (Python's functools.total_ordering can derive "
+                    "the rest from those two). If this class needs to remain hashable, "
+                    "also define '__hash__' explicitly - Python 3 sets it to None "
+                    "automatically on any class that defines '__eq__' without it."
+                ),
+            )
+        )
+    return findings
+
+
+def _find_pipes_module_imports(tree: ast.Module) -> list[Py2Finding]:
+    """`pipes` was a Python 2/early-3 stdlib module (shell-command
+    utilities); deprecated in 3.11 and removed entirely in 3.13 - importing
+    it raises `ModuleNotFoundError`, crashing the WHOLE module's import (not
+    just wherever it's used), which can make every characterization test
+    case look like a mismatch and obscure the real single-import cause -
+    same failure shape as bug #7's `types.UnicodeType`. No `lib2to3` fixer
+    exists (confirmed: no reference to `pipes` anywhere in the vendored
+    fixer set) - it's a stdlib removal, not a syntax difference. Found via
+    a real stress test (docs/bug-log.md #27): `kislyuk/argcomplete`'s
+    `__init__.py` imports it as part of a multi-name `import` statement.
+    Only matches `import pipes` (bare or multi-name) - not `from pipes
+    import quote`, a rarer form not seen in practice yet."""
+    findings: list[Py2Finding] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Import):
+            continue
+        for alias in node.names:
+            if alias.name != "pipes":
+                continue
+            findings.append(
+                Py2Finding(
+                    construct_name="pipes_module_import",
+                    line=node.lineno,
+                    col=node.col_offset,
+                    fixer_name=None,
+                    needs_llm=True,
+                    detail=(
+                        "'pipes' was removed in Python 3.13. Check how it's used in this "
+                        "file: if 'pipes.quote(...)' is called anywhere (including in "
+                        "comments/docstrings worth double-checking), replace it with "
+                        "'shlex.quote(...)' (the direct modern equivalent, available since "
+                        "Python 3.3) and remove the 'pipes' import. If it's imported but "
+                        "never actually used, simply remove the import."
+                    ),
+                )
+            )
     return findings
 
 
