@@ -1,10 +1,16 @@
 """Regression: lib2to3's tolerant grammar can successfully parse and
-mechanically transform py2 source that still isn't valid Python 3 afterward
-(real case, docs/bug-log.md #14: an obscure `if not hasattr(__builtins__,
-'True'): True, False = 1, 0` shim that lib2to3 has no fixer for). Before the
-fix, find_semantic_findings's ast.parse raised a raw, uncaught SyntaxError
-that fell through to run_migration's generic per-file backstop with a
-confusing message instead of a clear diagnosis."""
+mechanically transform py2 source that still isn't valid Python 3 afterward.
+Originally found via a real, obscure `if not hasattr(__builtins__, 'True'):
+True, False = 1, 0` shim (docs/bug-log.md #14) that lib2to3 has no fixer for
+- that exact construct now gets pre-empted by strip_dead_true_false_shim
+before it can ever reach this path (see test_analyze.py), so this test uses
+an analogous but distinct construct (assigning to `None`, the other Python 3
+reserved-keyword-that-was-a-plain-builtin-in-py2) to keep exercising the
+generic backstop this code path provides for whatever ISN'T (yet) a known,
+specifically-handled case. Before the original fix, find_semantic_findings's
+ast.parse raised a raw, uncaught SyntaxError that fell through to
+run_migration's generic per-file backstop with a confusing message instead of
+a clear diagnosis."""
 
 from pathlib import Path
 
@@ -22,11 +28,12 @@ from fakes import StubProvider
 UNAVAILABLE = SandboxRuntime(available=False, kind="unavailable", reason="not needed for this test")
 RUNTIMES = ExecutionRuntimes(py2=UNAVAILABLE, py3_for_ab=UNAVAILABLE, py3_for_c=UNAVAILABLE)
 
-# lib2to3 has no fixer for this obscure py2.2-era True/False builtin shim -
-# it survives deterministic_transform unchanged, and is a real SyntaxError
-# under Python 3's actual parser (True/False are reserved keywords there).
+# lib2to3 has no fixer for this construct - it survives deterministic_transform
+# unchanged, and is a real SyntaxError under Python 3's actual parser (None
+# is a reserved keyword there, never a valid assignment target - same
+# category as the True/False shim this test file used to exercise directly).
 SOURCE_WITH_UNFIXABLE_SYNTAX = (
-    "if not hasattr(__builtins__, 'True'): True, False = 1, 0\n"
+    "if not hasattr(__builtins__, 'None'): None = 0\n"
     "def f(x):\n"
     "    return x\n"
 )

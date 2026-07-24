@@ -274,13 +274,27 @@ def expand_function_seeds(plan: FunctionSeedPlan, *, case_budget: int) -> list[T
     return cases[:budget]
 
 
-def _neighbor_variants(failing_args: tuple, *, function_name: str, count: int = 3) -> list[TestCase]:
+def _neighbor_variants(
+    failing_args: tuple,
+    *,
+    function_name: str,
+    count: int = 3,
+    class_name: str | None = None,
+    constructor_args_literal: str | None = None,
+) -> list[TestCase]:
     """A small, fixed-size set of boundary-nudged variants of a known-failing
     case's args - a cheap, non-library analog of property-based-testing
     shrinking. Not a provably-minimal repro, but nudging a known-failing
     input toward simpler/boundary values and seeing which nudges still fail
     gets most of the practical debugging value (is this boundary-specific or
-    broad?) at a fixed, small, predictable extra cost."""
+    broad?) at a fixed, small, predictable extra cost.
+
+    class_name/constructor_args_literal must be carried through when the
+    originating failure was a class-method case - omitting them would build
+    a variant that calls function_name as if it were a top-level function,
+    silently probing the wrong thing (not a false mismatch, since it'd fail
+    identically on both sides, but a wasted, meaningless probe instead of a
+    real shrinking step)."""
     rng = _rng_for(function_name)
     variants = []
     for _ in range(count):
@@ -290,6 +304,8 @@ def _neighbor_variants(failing_args: tuple, *, function_name: str, count: int = 
                 function_name=function_name,
                 args_literal=repr(mutated),
                 rationale=f"[{_NEIGHBOR_ORIGIN}] boundary variant of the first failing case",
+                class_name=class_name,
+                constructor_args_literal=constructor_args_literal,
             )
         )
     return variants

@@ -58,7 +58,7 @@ def run_mode_r(
                 args_literal=case.args_literal,
                 rationale="[recorded] real captured call",
             )
-            py3_out = _run_case_in(py3_runtime, Path(py3_dir), module_name, driver_case, timeout)
+            py3_out, _py3_err = _run_case_in(py3_runtime, Path(py3_dir), module_name, driver_case, timeout)
             py3_kind, _, py3_val = py3_out.partition(":")
             case_label = f"{case.function_name}{case.args_literal} [recorded]"
 

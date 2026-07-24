@@ -7,14 +7,25 @@ real original Python 2 code with the inputs you propose. If you don't know
 what a function does, that's fine: propose plausible inputs and let real
 execution reveal the real behavior.
 
-You will be given one or more functions from the same file, each as its own
-section (marked by a "## Function: <name>" header) with:
+You will be given one or more functions and/or class methods from the same
+file. A plain top-level function is its own section (marked by a
+"## Function: <name>" header) with:
 - The function's own source code (always available).
 - Its docstring, if one exists.
 - Call-site evidence, if any exists: real places elsewhere in the codebase
   that call this function, with the actual argument values used there
   (literal values only - non-literal arguments show as "<non-literal>"
   since their real value isn't known statically).
+
+A class method is instead marked by a "## Method: ClassName.method_name"
+header, with the same source/docstring/call-site-evidence sections for the
+method itself, PLUS a "### Constructor (__init__)" section showing the
+class's own `__init__` (or a note that there isn't one, meaning the class
+takes no constructor arguments at all). To test a method you must construct
+an instance of its class first - propose constructor arguments the same way
+you'd propose arguments for any other function, using the same priority
+order below, but reasoning about `__init__`'s own parameters/docstring/body
+instead of the method's.
 
 Propose test cases for every function given, not just the first one. Judge
 each function independently using the priority order below.
@@ -36,17 +47,24 @@ both a typical case and the most relevant edge case(s), not exhaustive
 coverage.
 
 Output a CharacterizationTestPlan: a single flat list of TestCases covering
-ALL functions given. For each:
-- function_name: the exact function name this case tests (must match one of
-  the given "## Function: <name>" headers).
-- args_literal: a Python TUPLE-LITERAL string of POSITIONAL arguments only,
-  e.g. "(10, 4)" for two args, or "()" for no arguments. This MUST be a
-  literal tuple containing only literals - numbers, strings, lists, dicts,
-  nested tuples, booleans, None. Never a function call, variable reference,
-  attribute access, or keyword-argument syntax (e.g. "(a=5)" is NOT valid
-  here - only positional values). It will be parsed with ast.literal_eval,
-  which only accepts genuine literal syntax, so anything else will simply
-  fail to parse and be discarded.
+EVERY function and method given. For each:
+- function_name: for a "## Function: <name>" section, the exact function
+  name. For a "## Method: ClassName.method_name" section, the exact METHOD
+  name only (not prefixed with the class name).
+- args_literal: a Python TUPLE-LITERAL string of POSITIONAL arguments to call
+  the function (or, for a method, the method itself) with - e.g. "(10, 4)"
+  for two args, or "()" for no arguments. This MUST be a literal tuple
+  containing only literals - numbers, strings, lists, dicts, nested tuples,
+  booleans, None. Never a function call, variable reference, attribute
+  access, or keyword-argument syntax (e.g. "(a=5)" is NOT valid here - only
+  positional values). It will be parsed with ast.literal_eval, which only
+  accepts genuine literal syntax, so anything else will simply fail to parse
+  and be discarded.
+- class_name / constructor_args_literal: ONLY for a "## Method:
+  ClassName.method_name" section - set class_name to the exact class name,
+  and constructor_args_literal to a literal tuple (same rules as
+  args_literal) for constructing the instance the method gets called on. For
+  a plain "## Function: <name>" section, leave both unset.
 - rationale: one short phrase (max ~8 words) explaining why this input was
   chosen (e.g. "matches a real call site" / "edge case: zero divisor").
 

@@ -4,7 +4,12 @@ from pathlib import Path
 
 from shiftcode.config import LLMConfig, ShiftConfig
 from shiftcode.models import GateOutcome
-from shiftcode.pipeline.verify.behavior_gate import has_main_block, run_mode_a, run_mode_b
+from shiftcode.pipeline.verify.behavior_gate import (
+    _strip_interpreter_warning_noise,
+    has_main_block,
+    run_mode_a,
+    run_mode_b,
+)
 from shiftcode.pipeline.verify.determinism import check_determinism
 from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime, resolve_py2_runtime
 
@@ -365,3 +370,58 @@ def test_run_mode_b_writes_module_and_closure_at_real_nested_paths():
     assert py2_runtime.captured_tree["mypkg/helpers.py"] == "py2 helper\n"
     assert py3_runtime.captured_tree["mypkg/cli.py"] == "py3 cli\n"
     assert py3_runtime.captured_tree["mypkg/helpers.py"] == "py3 helper\n"
+
+
+def test_strip_interpreter_warning_noise_removes_a_real_syntax_warning_block():
+    """Real, confirmed case (a real stress test against aaronsw/html2text):
+    Python 3 emits a SyntaxWarning at import time for an invalid escape
+    sequence that Python 2 never emits, even though actual behavior is
+    identical - pure interpreter noise."""
+    stderr = (
+        "/work/html2text.py:341: SyntaxWarning: \"\\s\" is an invalid escape sequence. "
+        "Such sequences will not work in the future. Did you mean \"\\\\s\"? A raw string is also an option.\n"
+        "  data = re.sub('\\s+', ' ', data)\n"
+    )
+    assert _strip_interpreter_warning_noise(stderr) == ""
+
+
+def test_strip_interpreter_warning_noise_leaves_real_program_output_alone():
+    stderr = "Traceback (most recent call last):\nValueError: something genuinely broke\n"
+    assert _strip_interpreter_warning_noise(stderr) == stderr
+
+
+def test_run_mode_b_passes_when_only_stderr_differs_by_a_py3_warning():
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="hello\n", stderr=""))
+    py3_runtime = _FakeAvailableRuntime(
+        pytest_result=_proc(
+            stdout="hello\n",
+            stderr="/work/m.py:1: SyntaxWarning: invalid escape sequence\n  x = '\\s'\n",
+        )
+    )
+
+    result = run_mode_b(
+        module_filename="m.py",
+        module_source_py2="print('hello')\n",
+        module_source_py3="print('hello')\n",
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+    )
+
+    assert result.outcome == GateOutcome.PASS
+
+
+def test_run_mode_b_still_fails_on_a_real_stderr_difference():
+    py2_runtime = _FakeAvailableRuntime(pytest_result=_proc(stdout="hello\n", stderr=""))
+    py3_runtime = _FakeAvailableRuntime(
+        pytest_result=_proc(stdout="hello\n", stderr="Traceback (most recent call last):\nValueError: real bug\n")
+    )
+
+    result = run_mode_b(
+        module_filename="m.py",
+        module_source_py2="print('hello')\n",
+        module_source_py3="print('hello')\n",
+        py2_runtime=py2_runtime,
+        py3_runtime=py3_runtime,
+    )
+
+    assert result.outcome == GateOutcome.FAIL

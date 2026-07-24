@@ -60,6 +60,13 @@ class ShiftConfig:
     # Mode R section). None means Mode R never engages, byte-for-byte
     # unchanged behavior from before this existed.
     recordings_dir: str | None = None
+    # Off by default (opt-in): a directory run_migration writes a per-file
+    # snapshot to as each file reaches a terminal status (VERIFIED/
+    # VERIFIED_INFERRED/VERIFIED_RECORDED/NEEDS_REVIEW), and reads back at
+    # the start of a run to skip re-processing any file whose source hasn't
+    # changed since (pipeline/checkpoint.py). None means checkpointing never
+    # engages, byte-for-byte unchanged behavior from before this existed.
+    checkpoint_dir: str | None = None
 
     def llm_for(self, role: str) -> LLMConfig:
         return self.agent_overrides.get(role, self.llm)
@@ -127,6 +134,7 @@ def load_config(
     cli_characterization_fuzz_cases: int | None = None,
     cli_capture_repair_history: bool | None = None,
     cli_recordings_dir: str | None = None,
+    cli_checkpoint_dir: str | None = None,
 ) -> ShiftConfig:
     """Resolve config with precedence: CLI args > env vars > pyproject.toml [tool.shiftcode] > defaults."""
     table = _load_pyproject_table(project_root)
@@ -171,6 +179,7 @@ def load_config(
     )
     repair_history_path = table.get("repair_history_path", ".shiftcode/repair_history.jsonl")
     recordings_dir = cli_recordings_dir or table.get("recordings_dir")
+    checkpoint_dir = cli_checkpoint_dir or table.get("checkpoint_dir")
 
     return ShiftConfig(
         llm=llm,
@@ -188,4 +197,5 @@ def load_config(
         capture_repair_history=capture_repair_history,
         repair_history_path=repair_history_path,
         recordings_dir=recordings_dir,
+        checkpoint_dir=checkpoint_dir,
     )

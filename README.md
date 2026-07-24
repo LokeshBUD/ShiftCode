@@ -57,15 +57,25 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
   turned into permanent, deterministic detectors, automating the first draft
   of exactly the kind of fixer this project already adds by hand when it
   finds a new bug class. Details: `docs/self-improving-fixer-library.md`.
+- **Class-method characterization for Mode C** — auto-generated tests now
+  cover class methods too, not just top-level functions: constructs a real
+  instance, then calls the method on it, same zero-trust literal-only input
+  safety as everywhere else. Unblocks class-only files that previously had
+  nothing for Mode C to characterize at all.
 - **Record/replay verification against real usage data (Mode R)** — a
   solo-developer-feasible version of shadow testing: record real
   `(args → result)` calls from your own Python 2 code in your own
   environment, replay those exact real inputs against the migrated
   candidate later, entirely offline, no live py2 interpreter needed at
   verify time. Details: `docs/verification.md`.
+- **Checkpoint/resume** — `--checkpoint-dir` writes a per-file snapshot as
+  each file reaches a real terminal outcome; a later run pointed at the same
+  directory skips re-processing any file whose source hasn't changed,
+  zero further LLM/sandbox cost for it. A killed run no longer means
+  starting over from scratch.
 - **Provider-agnostic** — any OpenAI-compatible endpoint, config not code.
   See *Works with any LLM provider* below.
-- 263 unit tests, all passing, none of which require a real LLM or Docker.
+- 313 unit tests, all passing, none of which require a real LLM or Docker.
 
 ## How it works
 
@@ -167,7 +177,8 @@ with the `python:2.7` image pulled. Without one, every behavior gate
 correctly degrades to `UNVERIFIED` rather than fabricating a pass.
 
 ```bash
-pytest                                          # 263 tests, no LLM/Docker required
+pytest                                          # 313 tests, no LLM/Docker required
+shiftcode migrate <path> --checkpoint-dir .shiftcode/checkpoint  # resume-safe: skips already-finished files on a re-run
 shiftcode migrate <path> --dry-run              # list findings only, no LLM calls
 shiftcode migrate <path> --output-dir ./out     # full run
 shiftcode migrate <path> --characterization-fuzz-cases 50 --capture-repair-history  # opt into fuzzing + repair capture
@@ -178,13 +189,18 @@ shiftcode migrate <path> --recordings-dir .shiftcode/recordings # verify against
 
 ## Validated against real code
 
-13 real, unattended runs against real-world libraries pulled from GitHub at
+17 real, unattended runs against real-world libraries pulled from GitHub at
 their actual pre-migration commit (not the bundled fixtures) — `docopt`,
 `python-slugify`, `inflection`, `jsonschema`, `purl`, `html2text`,
-`schedule`, `requests`, `toolz`, `blinker`, `argcomplete`, plus a full
-corpus regression re-run. 27 real bugs found and fixed as a direct result,
-each with root cause and fix documented. Full run-by-run record, including
-crashed/blocked runs (this is an honest log, not a highlight reel):
+`schedule`, `requests`, `toolz` (twice — once for the migration pipeline
+itself, once specifically to stress-test Mode R/record-replay against a
+real third-party function), `blinker`, `argcomplete` (each re-validated
+multiple times as fixes landed, including finally root-causing a mismatch
+left undiagnosed across 3 earlier rounds), plus a full corpus regression
+re-run and a dedicated model-capability-limit investigation. 36 real bugs
+found and fixed as a direct result, each with root cause and fix documented.
+Full run-by-run record, including crashed/blocked runs (this is an honest
+log, not a highlight reel):
 `docs/stress-test-log.md`. The bugs themselves, with root cause and what now
 catches that class going forward: `docs/bug-log.md`. The standing
 find/run/diagnose/design/confirm process every run follows:
@@ -198,9 +214,25 @@ find/run/diagnose/design/confirm process every run follows:
   Verification, however, is multi-file-aware (real dependency closures,
   see `docs/architecture.md`).
 - No multi-repo/batch orchestration yet.
-- A file with zero judgment-requiring findings gets exactly one
-  verification attempt, no Auditor diagnosis or retry even on a genuinely
-  fixable failure — a real, still-open gap (`docs/bug-log.md` #6).
+- Mode B's stderr comparison filters known Python interpreter warning noise
+  (`docs/bug-log.md` #34) but still requires exact equality on everything
+  else — a program's own real stderr output gets no special tolerance beyond
+  that. Fine for the case that's actually been hit so far; a genuinely
+  unresolved design question for anything broader.
+- Confirmed, not just suspected: some real repair failures are reproducibly
+  beyond the configured model's capability, not budget-limited — raising
+  `max_repair_attempts` from 3 to 8 changed nothing on 3 independent real
+  cases (identical failure every attempt in one case; the Auditor cycling
+  through contradictory theories without ever converging in the other two).
+  See `docs/stress-test-log.md` entry 16 for the full investigation,
+  including why a mechanical fallback for the simpler of the two failure
+  shapes turned out not to be safely buildable either.
+- `--checkpoint-dir` resumability only skips a file that fully finished
+  (reached VERIFIED/VERIFIED_INFERRED/VERIFIED_RECORDED/NEEDS_REVIEW) in a
+  previous run — a file killed partway through its own Phase A or Phase B
+  has no checkpoint entry yet and gets fully redone, not resumed mid-file.
+  A deliberate scope limit, not an oversight: still a real improvement over
+  "restart everything," not a claim of finer-grained recovery than that.
 
 Implementation-level limitations (heuristic import-matching specifics,
 symbol-splice fallback behavior, etc.) are in `docs/architecture.md`.

@@ -13,9 +13,23 @@ from shiftcode.agents.transform_auditor import TransformAuditorAgent
 from shiftcode.config import ShiftConfig
 from shiftcode.llm import get_provider
 from shiftcode.llm.errors import LLMAuthenticationError
-from shiftcode.models import FileUnit, MigrationPlan, MigrationReport, Py2Finding, Status
-from shiftcode.pipeline.analyze import find_lib2to3_findings, find_semantic_findings
-from shiftcode.pipeline.call_sites import find_call_site_evidence, top_level_function_defs
+from shiftcode.models import FileUnit, MigrationPlan, MigrationReport, Py2Finding, Status, TestCase
+from shiftcode.pipeline.analyze import find_lib2to3_findings, find_semantic_findings, strip_dead_true_false_shim
+from shiftcode.pipeline.checkpoint import (
+    TERMINAL_STATUSES,
+    load_checkpoint,
+    restore_file_unit,
+    serialize_file_unit,
+    source_hash,
+    write_checkpoint,
+)
+from shiftcode.pipeline.call_sites import (
+    class_init,
+    find_call_site_evidence,
+    public_methods,
+    top_level_class_defs,
+    top_level_function_defs,
+)
 from shiftcode.pipeline.dependencies import (
     ClosureFile,
     build_import_graph,
@@ -308,59 +322,96 @@ def _build_characterization_info(
     zero further LLM calls - deterministically expands that into up to
     characterization_fuzz_cases concrete TestCases per function."""
     functions = top_level_function_defs(file_unit.original_source)
-    if not functions:
+    classes = top_level_class_defs(file_unit.original_source)
+    if not functions and not classes:
         return None
 
-    symbol_names = {fn.name for fn in functions}
+    # class-only files (all public logic lives in methods, e.g. a real
+    # blinker/base.py or argcomplete/my_argparse.py) previously had nothing
+    # for Mode C to characterize at all - top_level_function_defs finds
+    # functions only. method_defs pairs each public method with its class's
+    # own __init__ (constructing an instance is a prerequisite for calling
+    # any method on it).
+    method_defs: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef, ast.FunctionDef | ast.AsyncFunctionDef | None]] = []
+    for cls in classes:
+        init_def = class_init(cls)
+        for method in public_methods(cls):
+            method_defs.append((cls.name, method, init_def))
+
+    symbol_names = {fn.name for fn in functions} | {method.name for _, method, _ in method_defs}
     other_files = [fu for fu in all_file_units if fu.path != file_unit.path]
     evidence_by_symbol = find_call_site_evidence(symbol_names, other_files)
 
     tiers_used: set[str] = set()
-    contexts: list[FunctionContext] = []
-    for fn in functions:
-        docstring = ast.get_docstring(fn)
-        evidence = evidence_by_symbol.get(fn.name, [])
-        function_source = ast.get_source_segment(file_unit.original_source, fn) or ""
 
+    def _context_for(name: str, node, *, class_name: str | None = None, init_source: str | None = None) -> FunctionContext:
+        docstring = ast.get_docstring(node)
+        evidence = evidence_by_symbol.get(name, [])
+        source = ast.get_source_segment(file_unit.original_source, node) or ""
         if evidence:
             tiers_used.add("call_sites")
         elif docstring:
             tiers_used.add("docstring")
         else:
             tiers_used.add("llm_inference")
-
-        contexts.append(
-            FunctionContext(
-                name=fn.name, source=function_source, docstring=docstring, call_site_evidence=evidence
-            )
+        return FunctionContext(
+            name=name,
+            source=source,
+            docstring=docstring,
+            call_site_evidence=evidence,
+            class_name=class_name,
+            init_source=init_source,
         )
 
+    function_contexts = [_context_for(fn.name, fn) for fn in functions]
+    method_contexts = [
+        _context_for(
+            method.name,
+            method,
+            class_name=class_name,
+            init_source=ast.get_source_segment(file_unit.original_source, init_def) if init_def else None,
+        )
+        for class_name, method, init_def in method_defs
+    ]
+
     evidence_source = "+".join(sorted(tiers_used))
+    cases: list[TestCase] = []
 
-    if characterization_fuzz_cases > 0:
+    # Differential fuzzing (propose_fuzz_seeds/expand_function_seeds) stays
+    # top-level-function-only for now - extending it to constructor+method
+    # param combinations is real further scope, not needed to unblock
+    # class-only files. Methods always go through the plain propose_tests
+    # path below (a handful of examples, same as the non-fuzz default),
+    # regardless of characterization_fuzz_cases.
+    if characterization_fuzz_cases > 0 and function_contexts:
         try:
-            fuzz_plan = characterization_agent.propose_fuzz_seeds(functions=contexts)
+            fuzz_plan = characterization_agent.propose_fuzz_seeds(functions=function_contexts)
+            cases.extend(
+                case
+                for seed_plan in fuzz_plan.function_seed_plans
+                for case in expand_function_seeds(seed_plan, case_budget=characterization_fuzz_cases)
+            )
         except AgentOutputError:
-            return None  # this file just doesn't get characterization-tested
-        cases = [
-            case
-            for seed_plan in fuzz_plan.function_seed_plans
-            for case in expand_function_seeds(seed_plan, case_budget=characterization_fuzz_cases)
-        ]
-        if not cases:
-            return None
-        return CharacterizationInfo(cases=cases, evidence_source=evidence_source)
+            pass  # functions just don't get fuzz-characterized this run
+    elif function_contexts:
+        try:
+            # One call for every function in this file, not one call per
+            # function - see FunctionContext's docstring for why.
+            plan = characterization_agent.propose_tests(functions=function_contexts)
+            cases.extend(plan.cases)
+        except AgentOutputError:
+            pass
 
-    try:
-        # One call for every function in this file, not one call per function
-        # - see FunctionContext's docstring for why.
-        plan = characterization_agent.propose_tests(functions=contexts)
-    except AgentOutputError:
-        return None  # this file just doesn't get characterization-tested
+    if method_contexts:
+        try:
+            method_plan = characterization_agent.propose_tests(functions=method_contexts)
+            cases.extend(method_plan.cases)
+        except AgentOutputError:
+            pass
 
-    if not plan.cases:
+    if not cases:
         return None
-    return CharacterizationInfo(cases=plan.cases, evidence_source=evidence_source)
+    return CharacterizationInfo(cases=cases, evidence_source=evidence_source)
 
 
 def _process_file_phase_a(
@@ -381,8 +432,15 @@ def _process_file_phase_a(
     non-NEEDS_REVIEW file has a deterministic_output/plan available as a
     fallback source for whichever OTHER file's dependency closure needs it
     (see dependencies.py's closure_files_for_sandbox)."""
+    # Known-dead constructs that would otherwise prevent ast.parse() itself
+    # from succeeding (see strip_dead_true_false_shim's own docstring) get
+    # stripped before any other analysis sees the source - same timing as
+    # ingest.py's own trailing-newline normalization, one step further
+    # upstream than the SyntaxError-catch below used to be the only defense.
+    file_unit.original_source, shim_findings = strip_dead_true_false_shim(file_unit.original_source)
+
     _emit(on_progress, file_unit, "running deterministic transform")
-    lib_findings = find_lib2to3_findings(file_unit.original_source)
+    lib_findings = shim_findings + find_lib2to3_findings(file_unit.original_source)
 
     try:
         file_unit.deterministic_output = deterministic_transform(file_unit.original_source)
@@ -398,15 +456,13 @@ def _process_file_phase_a(
     except SyntaxError as exc:
         # lib2to3's tolerant grammar successfully parsed and mechanically
         # transformed the original source, but the RESULT still isn't valid
-        # Python 3 - a real, confirmed case: an obscure Python 2.2-era
-        # `if not hasattr(__builtins__, 'True'): True, False = 1, 0` shim,
-        # which lib2to3 has no fixer for, survives the transform unchanged,
-        # and Python 3's real ast.parse correctly rejects it (True/False are
-        # reserved keywords there, never valid assignment targets). Without
-        # this, the raw SyntaxError fell through to the generic per-file
-        # backstop in run_migration with a confusing message instead of a
-        # clear diagnosis - same NEEDS_REVIEW outcome either way (safe, no
-        # crash - see docs/bug-log.md #3), just a much clearer reason.
+        # Python 3 - real, confirmed cases exist (docs/bug-log.md #14) where a
+        # construct lib2to3 has no fixer for survives the transform
+        # unchanged. strip_dead_true_false_shim above now pre-empts the one
+        # specific known case; this remains the honest backstop for whatever
+        # isn't (yet) a known case - NEEDS_REVIEW with a clear diagnosis
+        # rather than a raw traceback fragment, never a crash or false
+        # confidence (docs/bug-log.md #3).
         file_unit.py2_findings = lib_findings
         file_unit.status = Status.NEEDS_REVIEW
         file_unit.reason = f"deterministically-transformed source is not valid Python 3: {exc}"
@@ -644,6 +700,38 @@ def run_migration(
     # presentation fix.
     sandbox_root_prefix = _sandbox_root_prefix(effective_root, file_units, test_pairs)
 
+    # Off by default (config.checkpoint_dir is None), byte-for-byte unchanged
+    # behavior from before this existed. When set: restore any file whose
+    # source hasn't changed since a previous run's checkpoint and which
+    # already reached a terminal status - skipped entirely in both phases
+    # below, zero LLM/sandbox cost for it this run. A file only partially
+    # through Phase A when a previous run was killed has no checkpoint entry
+    # at all (only written once a file finishes) and gets fully redone -
+    # an honest, deliberate scope limit, not an oversight (docs/bug-log.md).
+    checkpoint_dir = Path(config.checkpoint_dir) if config.checkpoint_dir else None
+    checkpoint_snapshot: dict[str, dict] = load_checkpoint(checkpoint_dir, root=root) if checkpoint_dir else {}
+    resumed_paths: set[Path] = set()
+    if checkpoint_dir:
+        for file_unit in file_units:
+            rel_key = str(file_unit.path.relative_to(effective_root))
+            entry = checkpoint_snapshot.get(rel_key)
+            if (
+                entry is not None
+                and entry.get("source_hash") == source_hash(file_unit.original_source)
+                and entry.get("status") in {s.value for s in TERMINAL_STATUSES}
+            ):
+                restore_file_unit(file_unit, entry)
+                resumed_paths.add(file_unit.path)
+                if on_progress:
+                    on_progress(f"{file_unit.path.name}: resumed from checkpoint ({entry['status']})")
+
+    def _checkpoint(file_unit: FileUnit) -> None:
+        if checkpoint_dir is None:
+            return
+        rel_key = str(file_unit.path.relative_to(effective_root))
+        checkpoint_snapshot[rel_key] = serialize_file_unit(file_unit)
+        write_checkpoint(checkpoint_dir, root=root, files_snapshot=checkpoint_snapshot)
+
     try:
         # Phase A: transform + findings + Planner + Mode C case generation
         # for every file, before ANY file reaches Phase B - guarantees every
@@ -651,6 +739,8 @@ def run_migration(
         # a fallback source for whichever other file's dependency closure
         # needs it.
         for i, file_unit in enumerate(file_units, start=1):
+            if file_unit.path in resumed_paths:
+                continue  # restored from checkpoint - already terminal, skip entirely
             if file_unit.status == Status.NEEDS_REVIEW:
                 continue  # already flagged at ingest (e.g. oversized file)
             if on_progress:
@@ -684,6 +774,12 @@ def run_migration(
                 file_unit.status = Status.NEEDS_REVIEW
                 file_unit.reason = f"unexpected error while processing this file: {exc}"
 
+            if file_unit.status == Status.NEEDS_REVIEW:
+                # Phase A itself concluded this file is done (e.g. a
+                # transform/parse failure) - it never reaches Phase B, so
+                # this is the only chance to checkpoint it.
+                _checkpoint(file_unit)
+
         # Phase B: repair loop, topological order by local-import dependencies
         # (files with no local deps first) - so a dependent gets its
         # dependencies' freshest available candidate wherever possible.
@@ -691,6 +787,8 @@ def run_migration(
         ordered_units = topological_order(file_units, edges)
 
         for file_unit in ordered_units:
+            if file_unit.path in resumed_paths:
+                continue  # restored from checkpoint - already terminal, skip entirely
             if file_unit.status == Status.NEEDS_REVIEW:
                 continue  # Phase A failed for this file (or pre-flagged at ingest)
             test_info = test_pairs.get(file_unit.path)
@@ -734,6 +832,8 @@ def run_migration(
             except Exception as exc:
                 file_unit.status = Status.NEEDS_REVIEW
                 file_unit.reason = f"unexpected error while processing this file: {exc}"
+
+            _checkpoint(file_unit)
 
         if config.capture_repair_history:
             history_entries = [e for fu in file_units if (e := qualifying_repair(fu)) is not None]

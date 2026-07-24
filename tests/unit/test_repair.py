@@ -41,6 +41,35 @@ def test_migrate_file_skips_refactorer_when_plan_has_no_steps():
     assert result.status == Status.NEEDS_REVIEW  # unverifiable, no py2 runtime, no __main__ block
 
 
+def test_migrate_file_retries_even_with_empty_plan_when_the_free_check_finds_something_fixable():
+    """docs/bug-log.md #6: previously a file with zero judgment-requiring
+    findings gave up immediately on ANY failure at its free first check,
+    even one a real repair attempt could plausibly fix. A RETRY-classified
+    failure (here: a genuinely broken deterministic_output) must now fall
+    through into the same bounded Auditor<->Refactorer loop every other
+    file gets, seeded with a diagnosis of that first failure."""
+    fixed_patch = RefactorPatch(blocks=[SymbolBlock(symbol="__module__", new_source="x = 1\n")])
+    hint = RepairHint(root_cause="broken deterministic output", hint="fix the syntax")
+    refactorer = RefactorerAgent(StubProvider([fixed_patch]))
+    auditor = AuditorAgent(StubProvider([hint]))
+
+    fu = FileUnit(
+        path=Path("m.py"),
+        original_source="x = 1\n",
+        deterministic_output="x = 1(\n",  # deliberately broken syntax
+        plan=MigrationPlan(steps=[]),
+    )
+
+    result = migrate_file(fu, refactorer=refactorer, auditor=auditor, py2_runtime=UNAVAILABLE_RUNTIME)
+
+    assert len(result.repair_attempts) == 2
+    assert result.repair_attempts[0].candidate_source == "x = 1(\n"
+    assert "SYNTAX_ERROR" in result.repair_attempts[0].failure_summary
+    assert result.repair_attempts[0].hint == "fix the syntax"
+    assert result.repair_attempts[1].candidate_source == "x = 1\n"
+    assert result.final_source == "x = 1\n"
+
+
 def test_migrate_file_needs_review_when_behavior_unverifiable():
     good_patch = RefactorPatch(
         blocks=[SymbolBlock(symbol="divide", new_source="def divide(a, b):\n    result = a / b\n    return result\n")]

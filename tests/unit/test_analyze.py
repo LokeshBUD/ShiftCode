@@ -1,4 +1,8 @@
-from shiftcode.pipeline.analyze import find_lib2to3_findings, find_semantic_findings
+from shiftcode.pipeline.analyze import (
+    find_lib2to3_findings,
+    find_semantic_findings,
+    strip_dead_true_false_shim,
+)
 from shiftcode.pipeline.transform.deterministic import deterministic_transform
 
 PY2_SOURCE = '''def divide(a, b):
@@ -186,3 +190,45 @@ def test_find_semantic_findings_ignores_unrelated_imports():
     source = "import os, sys, shlex\nfrom pipes_utils import helper\n"
     findings, _ = find_semantic_findings(source)
     assert not any(f.construct_name == "pipes_module_import" for f in findings)
+
+
+def test_strip_dead_true_false_shim_removes_the_real_construct():
+    """Real construct found via a real stress test (docs/bug-log.md #14,
+    aaronsw/html2text): a Python 2.2-era shim that ast.parse() can never get
+    past on Python 3 (True/False are reserved keywords), so no AST-based
+    detector can ever see it - this has to be a pre-parse textual strip."""
+    source = "if not hasattr(__builtins__, 'True'): True, False = 1, 0\nimport re\n"
+    stripped, findings = strip_dead_true_false_shim(source)
+
+    assert "hasattr(__builtins__" not in stripped
+    import ast
+
+    ast.parse(stripped)  # now actually parseable under py3
+    assert len(findings) == 1
+    assert findings[0].construct_name == "dead_true_false_shim"
+    assert findings[0].needs_llm is False
+    assert findings[0].line == 1
+
+
+def test_strip_dead_true_false_shim_preserves_line_numbers():
+    source = "x = 1\nif not hasattr(__builtins__, 'True'): True, False = 1, 0\ny = 2\n"
+    stripped, findings = strip_dead_true_false_shim(source)
+
+    lines = stripped.splitlines()
+    assert lines[0] == "x = 1"
+    assert lines[2] == "y = 2"
+    assert findings[0].line == 2
+
+
+def test_strip_dead_true_false_shim_tolerates_double_quotes():
+    source = 'if not hasattr(__builtins__, "True"): True, False = 1, 0\n'
+    stripped, findings = strip_dead_true_false_shim(source)
+    assert len(findings) == 1
+    assert "hasattr" not in stripped
+
+
+def test_strip_dead_true_false_shim_leaves_unrelated_source_untouched():
+    source = "if not hasattr(obj, 'x'):\n    pass\nTrue_value = True\n"
+    stripped, findings = strip_dead_true_false_shim(source)
+    assert stripped == source
+    assert findings == []

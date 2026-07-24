@@ -25,9 +25,11 @@
 # Deliberately conservative: never lets recording break the function it
 # wraps. The real call always happens and its real result/exception is
 # always returned/raised, regardless of whether recording succeeds. Only
-# JSON-serializable calls get captured - anything else (custom objects,
+# calls whose args/kwargs/result round-trip losslessly through
+# repr()/ast.literal_eval get captured - anything else (custom objects,
 # file handles, etc.) is silently skipped, not an error.
 
+import ast
 import functools
 import json
 import os
@@ -37,6 +39,28 @@ DEFAULT_OUT_DIR = os.environ.get("SHIFTCODE_RECORD_DIR", ".shiftcode/recordings"
 DEFAULT_MAX_ENTRIES = 200
 
 _counts = {}
+
+
+def _safe_repr(value):
+    """repr(), pre-validated by round-tripping through ast.literal_eval -
+    the same check recording_loader.py does again at load time (a
+    recording file is a separate, later-trusted-less artifact by the time
+    it's loaded, so that check is never skipped just because this one
+    passed). Using repr() rather than raw JSON values here is deliberate,
+    found via a real stress test: json.dumps silently coerces ALL dict keys
+    to strings (`{1: 'one'}` on the wire becomes `{"1": "one"}`) and
+    collapses the tuple/list distinction - both would cause false
+    mismatches at replay time that have nothing to do with any real
+    behavior difference. repr()/literal_eval round-trips losslessly for
+    anything in the literal-safe universe instead. Returns None (skip this
+    value entirely) for anything that doesn't round-trip - a custom object,
+    a file handle, etc.; also None for a genuinely broken __repr__."""
+    try:
+        text = repr(value)
+        ast.literal_eval(text)
+        return text
+    except Exception:
+        return None
 
 
 def record(func=None, max_entries=DEFAULT_MAX_ENTRIES, out_dir=None):
@@ -67,19 +91,38 @@ def _try_record(func, args, kwargs, max_entries, out_dir, result=None, exception
         count = _counts.get(name, 0)
         if count >= max_entries:
             return
+
+        args_repr = _safe_repr(tuple(args))
+        if args_repr is None:
+            return  # can't safely/losslessly represent this call at all
+
+        kwargs_repr = _safe_repr(kwargs) if kwargs else None
+        if kwargs and kwargs_repr is None:
+            return
+
+        result_repr = None
+        if exception is None:
+            result_repr = _safe_repr(result)
+            if result_repr is None:
+                return
+
         entry = {
             "function": name,
             "module": getattr(func, "__module__", None),
-            "args": list(args),
-            "kwargs": kwargs,
-            "result": result,
+            "args_repr": args_repr,
+            "kwargs_repr": kwargs_repr,
+            "result_repr": result_repr,
             "exception": exception,
             "timestamp": time.time(),
         }
-        # json.dumps first, before touching the filesystem at all - a
-        # non-serializable arg/result (a custom object, a file handle, ...)
-        # raises TypeError here, caught by the bare except below, and the
-        # whole entry is skipped cleanly with no partial/corrupt write.
+        # Every value above is already a plain string (repr() output) or
+        # None/a string - json.dumps of the wrapping structure can't fail
+        # at this point the way it could when raw objects were stored
+        # directly (the reason this is still wrapped in try/except: a
+        # pathological custom __repr__ could itself return a non-string,
+        # or getattr(func, "__module__", None) could theoretically be
+        # something odd - belt and suspenders, not the primary defense
+        # anymore).
         line = json.dumps(entry)
     except Exception:
         return

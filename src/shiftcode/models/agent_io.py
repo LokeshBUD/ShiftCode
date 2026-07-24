@@ -1,4 +1,20 @@
-from pydantic import BaseModel
+import re
+
+from pydantic import BaseModel, field_validator
+
+# A function name that will get spliced directly into driver-script SOURCE
+# CODE (characterization_gate.py's _build_driver_script:
+# f"_mod.{case.function_name}(*_args)") - unlike args_literal, which is
+# defended by ast.literal_eval's structural inability to evaluate a call,
+# nothing previously stopped a manipulated response from putting arbitrary
+# source text here (e.g. "x); __import__('os').system('...'); (" would
+# splice into real executable code). A real top-level function's name is
+# always a plain identifier by construction, so this can never reject a
+# legitimate case - only an injection attempt. Found and fixed while
+# building Mode R's recording_loader.py, which needed the same check for a
+# genuinely new untrusted input (a JSONL file) and surfaced that the
+# existing LLM-facing path had never had one at all.
+IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class PlanStep(BaseModel):
@@ -40,6 +56,32 @@ class TestCase(BaseModel):
     # attribute access, no matter what the model returns.
     args_literal: str
     rationale: str
+    # None (the default) means "function_name is a top-level function" -
+    # byte-for-byte the same case shape/behavior as before class-method
+    # characterization existed. When set, function_name is instead a METHOD
+    # on this class: the driver constructs `class_name(*constructor_args)`
+    # first, then calls `.function_name(*args_literal)` on that instance.
+    # Same injection posture as function_name (spliced directly into driver
+    # source) - validated as a plain identifier for the same reason.
+    class_name: str | None = None
+    # Same literal-only contract and validate_args_literal safety gate as
+    # args_literal, applied to the class's constructor instead of the method.
+    # None with class_name set means "call the constructor with no args".
+    constructor_args_literal: str | None = None
+
+    @field_validator("function_name")
+    @classmethod
+    def _function_name_must_be_a_plain_identifier(cls, value: str) -> str:
+        if not IDENTIFIER_RE.match(value):
+            raise ValueError(f"function_name {value!r} is not a plain identifier")
+        return value
+
+    @field_validator("class_name")
+    @classmethod
+    def _class_name_must_be_a_plain_identifier(cls, value: str | None) -> str | None:
+        if value is not None and not IDENTIFIER_RE.match(value):
+            raise ValueError(f"class_name {value!r} is not a plain identifier")
+        return value
 
 
 class CharacterizationTestPlan(BaseModel):

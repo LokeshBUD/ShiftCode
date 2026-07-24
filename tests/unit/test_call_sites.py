@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from shiftcode.models import FileUnit
-from shiftcode.pipeline.call_sites import find_call_site_evidence, top_level_function_defs
+from shiftcode.pipeline.call_sites import (
+    class_init,
+    find_call_site_evidence,
+    public_methods,
+    top_level_class_defs,
+    top_level_function_defs,
+)
 
 
 def test_top_level_function_defs_excludes_private_and_nested():
@@ -12,6 +18,39 @@ def test_top_level_function_defs_excludes_private_and_nested():
     )
     names = {fn.name for fn in top_level_function_defs(source)}
     assert names == {"public_fn"}
+
+
+def test_top_level_class_defs_excludes_private_classes():
+    source = "class Public:\n    pass\n\nclass _Private:\n    pass\n\ndef fn():\n    pass\n"
+    names = {c.name for c in top_level_class_defs(source)}
+    assert names == {"Public"}
+
+
+def test_public_methods_excludes_init_and_dunders_and_private():
+    source = (
+        "class Widget:\n"
+        "    def __init__(self, x):\n        self.x = x\n\n"
+        "    def resize(self, w):\n        pass\n\n"
+        "    def _helper(self):\n        pass\n\n"
+        "    def __repr__(self):\n        return ''\n"
+    )
+    cls = top_level_class_defs(source)[0]
+    names = {m.name for m in public_methods(cls)}
+    assert names == {"resize"}
+
+
+def test_class_init_finds_the_constructor():
+    source = "class Widget:\n    def __init__(self, x):\n        self.x = x\n\n    def resize(self):\n        pass\n"
+    cls = top_level_class_defs(source)[0]
+    init = class_init(cls)
+    assert init is not None
+    assert init.name == "__init__"
+
+
+def test_class_init_none_when_no_constructor_defined():
+    source = "class Widget:\n    def resize(self):\n        pass\n"
+    cls = top_level_class_defs(source)[0]
+    assert class_init(cls) is None
 
 
 def test_find_call_site_evidence_captures_literal_args():

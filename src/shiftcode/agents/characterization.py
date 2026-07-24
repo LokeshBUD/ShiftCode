@@ -14,6 +14,12 @@ class FunctionContext:
     source: str
     docstring: str | None
     call_site_evidence: list[CallSiteEvidence]
+    # None (the default) means this is a plain top-level function - identical
+    # rendering/behavior to before class-method characterization existed.
+    # When set, `name` is a METHOD on this class, and the agent is expected
+    # to propose constructor args for it too (see _render_function).
+    class_name: str | None = None
+    init_source: str | None = None
 
 
 def _render_call_site_evidence(evidence: list[CallSiteEvidence]) -> str:
@@ -23,6 +29,17 @@ def _render_call_site_evidence(evidence: list[CallSiteEvidence]) -> str:
 
 
 def _render_function(fn: FunctionContext) -> str:
+    if fn.class_name is not None:
+        sections = [
+            f"## Method: {fn.class_name}.{fn.name}",
+            "### Constructor (__init__)\n```python\n"
+            + (fn.init_source if fn.init_source else "(no __init__ defined - takes no constructor arguments)")
+            + "\n```",
+            "### Method source\n```python\n" + fn.source + "\n```",
+            "### Docstring\n" + (fn.docstring if fn.docstring else "(none)"),
+            "### Call-site evidence\n" + _render_call_site_evidence(fn.call_site_evidence),
+        ]
+        return "\n\n".join(sections)
     sections = [
         f"## Function: {fn.name}",
         "### Source\n```python\n" + fn.source + "\n```",

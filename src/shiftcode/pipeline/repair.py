@@ -257,34 +257,26 @@ def migrate_file(
 ) -> FileUnit:
     """Bounded Auditor<->Refactorer loop, wired to every verify gate. Mutates and
     returns file_unit with final_source, verify_result, status, and full
-    repair_attempts history. Never marks VERIFIED without passing the gates."""
+    repair_attempts history. Never marks VERIFIED without passing the gates.
+
+    A file with zero judgment-requiring findings (empty plan.steps) still
+    gets its first check for free - the deterministic-only candidate is
+    verified directly, no Refactorer call, zero LLM cost for the common
+    "clean mechanical migration" case (`skip_refactorer` below). Previously
+    ANY failure there ended the file immediately, even a genuinely
+    fixable-looking one (docs/bug-log.md #6) - a real gap, since "nothing
+    the Planner flagged" doesn't mean "nothing is actually wrong," just that
+    lib2to3's own fixers didn't know to flag it. Now only an
+    UNVERIFIED-classified result (structurally can't check at all - no py2
+    runtime, no test suite/entry point/characterization) stops immediately;
+    a RETRY-classified one (a real syntax/behavior/determinism problem) now
+    falls through into the exact same bounded repair loop every other file
+    gets, seeded with an Auditor diagnosis of that first failure - the
+    Refactorer's own prompt already renders "(no plan steps - nothing for
+    you to change)" plus "treat these [hints] as authoritative corrections,"
+    a combination it was already designed to handle, just never reached."""
     assert file_unit.deterministic_output is not None
     assert file_unit.plan is not None
-
-    if not file_unit.plan.steps:
-        _emit(on_progress, "verifying (no plan changes needed)")
-        candidate = file_unit.deterministic_output
-        result = verify_candidate(
-            file_unit.original_source,
-            candidate,
-            file_unit.path.name,
-            py2_runtime=py2_runtime,
-            py3_runtime=py3_runtime,
-            py3_runtime_for_c=py3_runtime_for_c,
-            determinism_runs=determinism_runs,
-            test_info=test_info,
-            characterization_info=characterization_info,
-            recorded_cases=recorded_cases,
-            dependency_closure=dependency_closure,
-            module_rel_path=module_rel_path,
-        )
-        classification = _classify(result)
-        file_unit.final_source = candidate
-        file_unit.verify_result = result
-        file_unit.status = _status_for_classification(classification)
-        if file_unit.status == Status.NEEDS_REVIEW:
-            file_unit.reason = _describe_failure(result)
-        return file_unit
 
     hints: list[RepairHint] = []
     candidate = file_unit.deterministic_output
@@ -292,30 +284,35 @@ def migrate_file(
     classification = "RETRY"
 
     for attempt in range(1, max_attempts + 1):
-        _emit(on_progress, f"attempt {attempt}/{max_attempts}: refactoring")
-        try:
-            candidate = refactorer.refactor(
-                deterministic_source=file_unit.deterministic_output,
-                plan=file_unit.plan,
-                hints=hints,
-            )
-        except AgentOutputError as exc:
-            classification = "RETRY"
-            failure_detail = f"REFACTORER_CALL_ERROR: {exc}"
-            _emit(on_progress, f"attempt {attempt}/{max_attempts}: Refactorer call failed, retrying")
-            file_unit.repair_attempts.append(
-                RepairAttempt(
-                    attempt_number=attempt,
-                    candidate_source="",
-                    failure_summary=failure_detail,
-                    hint=None,
+        skip_refactorer = attempt == 1 and not file_unit.plan.steps
+        if skip_refactorer:
+            _emit(on_progress, "verifying (no plan changes needed)")
+        else:
+            _emit(on_progress, f"attempt {attempt}/{max_attempts}: refactoring")
+            try:
+                candidate = refactorer.refactor(
+                    deterministic_source=file_unit.deterministic_output,
+                    plan=file_unit.plan,
+                    hints=hints,
                 )
-            )
-            # No candidate to verify or diff for the Auditor - just retry the
-            # Refactorer directly on the next attempt.
-            continue
+            except AgentOutputError as exc:
+                classification = "RETRY"
+                failure_detail = f"REFACTORER_CALL_ERROR: {exc}"
+                _emit(on_progress, f"attempt {attempt}/{max_attempts}: Refactorer call failed, retrying")
+                file_unit.repair_attempts.append(
+                    RepairAttempt(
+                        attempt_number=attempt,
+                        candidate_source="",
+                        failure_summary=failure_detail,
+                        hint=None,
+                    )
+                )
+                # No candidate to verify or diff for the Auditor - just retry the
+                # Refactorer directly on the next attempt.
+                continue
 
-        _emit(on_progress, f"attempt {attempt}/{max_attempts}: verifying")
+            _emit(on_progress, f"attempt {attempt}/{max_attempts}: verifying")
+
         result = verify_candidate(
             file_unit.original_source,
             candidate,
@@ -331,6 +328,20 @@ def migrate_file(
             module_rel_path=module_rel_path,
         )
         classification = _classify(result)
+
+        if skip_refactorer and classification != "RETRY":
+            # The free check either passed outright or hit something no
+            # amount of retrying could fix (UNVERIFIED - a structurally
+            # unverifiable environment). Stop here exactly as before this
+            # fix existed: no repair-attempt history recorded, since no
+            # repair was ever attempted.
+            file_unit.final_source = candidate
+            file_unit.verify_result = result
+            file_unit.status = _status_for_classification(classification)
+            if file_unit.status == Status.NEEDS_REVIEW:
+                file_unit.reason = _describe_failure(result)
+            return file_unit
+
         failure_detail = _describe_failure(result) if classification == "RETRY" else None
         _emit(on_progress, f"attempt {attempt}/{max_attempts}: {classification}")
 

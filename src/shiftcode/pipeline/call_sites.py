@@ -55,8 +55,10 @@ def top_level_symbol_names(source: str) -> set[str]:
 
 def top_level_function_defs(source: str) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
     """Public (non-underscore) top-level functions - the candidates for
-    characterization testing. Classes are out of scope for MVP (instantiation
-    + method-call synthesis is a materially bigger design surface)."""
+    characterization testing. See top_level_class_defs/public_methods for the
+    class-method counterpart of this (a file with class-only public logic,
+    like a real blinker/base.py or argcomplete/my_argparse.py, has none of
+    these at all)."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -64,6 +66,40 @@ def top_level_function_defs(source: str) -> list[ast.FunctionDef | ast.AsyncFunc
     return [
         node
         for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_")
+    ]
+
+
+def top_level_class_defs(source: str) -> list[ast.ClassDef]:
+    """Public (non-underscore) top-level classes - the class-method
+    characterization-testing candidates top_level_function_defs (functions
+    only) doesn't cover. See public_methods for extracting the actual
+    per-instance testable surface off of one of these."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    return [node for node in tree.body if isinstance(node, ast.ClassDef) and not node.name.startswith("_")]
+
+
+def class_init(class_def: ast.ClassDef) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    """The class's own __init__, if it defines one directly (not inherited -
+    no MRO/base-class resolution here, same heuristic posture as everything
+    else in this file). None means "no-arg construction", not "unknown"."""
+    for node in class_def.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__init__":
+            return node
+    return None
+
+
+def public_methods(class_def: ast.ClassDef) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    """Public (non-underscore) methods directly in the class body - excludes
+    __init__ and every other dunder too (same "not startswith _" filter as
+    top_level_function_defs), since __init__ is the constructor, handled
+    separately via class_init, not characterized as a case of its own."""
+    return [
+        node
+        for node in class_def.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and not node.name.startswith("_")
     ]
 

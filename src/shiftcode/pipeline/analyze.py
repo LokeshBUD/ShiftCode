@@ -1,4 +1,5 @@
 import ast
+import re
 
 from shiftcode.models import DependencySlice, Py2Finding
 from shiftcode.pipeline.transform.deterministic import make_refactoring_tool
@@ -10,6 +11,59 @@ from shiftcode.vendor.lib2to3.refactor import _detect_future_features
 def _fixer_short_name(fixer) -> str:
     module = type(fixer).__module__
     return module.rsplit(".", 1)[-1]
+
+
+# Real, confirmed case (docs/bug-log.md #14, aaronsw/html2text): a Python
+# 2.2-era compatibility shim guarding against interpreters old enough to lack
+# True/False as builtins. Unconditionally dead code on every real interpreter
+# (py2.3+ and all of py3 always have True/False, so the guarded body never
+# executes) - but it prevents ast.parse() itself from succeeding on py3,
+# since True/False are reserved keywords there, never valid assignment
+# targets. That makes it structurally unlike every other detector in this
+# file: those all walk an AST that already parsed successfully, and there's
+# no tree to walk here until this exact line is gone. One-line form only
+# (`if COND: BODY` on a single line) - that's the real shape found in the
+# wild; a multi-line if/body form isn't matched, since guessing at arbitrary
+# body shapes risks stripping something that isn't actually this construct.
+_DEAD_TRUE_FALSE_SHIM_RE = re.compile(
+    r"^[ \t]*if\s+not\s+hasattr\(\s*__builtins__\s*,\s*['\"]True['\"]\s*\)\s*:"
+    r"\s*True\s*,\s*False\s*=\s*1\s*,\s*0[ \t]*$",
+    re.MULTILINE,
+)
+
+
+def strip_dead_true_false_shim(source: str) -> tuple[str, list[Py2Finding]]:
+    """Pre-parse textual strip, not an AST-based detector - see the comment on
+    _DEAD_TRUE_FALSE_SHIM_RE for why an AST walk can't apply here. Meant to be
+    called before find_lib2to3_findings/deterministic_transform, same timing
+    as ingest.py's own trailing-newline normalization. Mechanical and
+    unconditionally safe (needs_llm=False): the guarded body never executes
+    on any real interpreter, py2 or py3, so removing it changes nothing about
+    real runtime behavior on either side. The matched line is replaced with a
+    blank line rather than deleted outright, so every other line number in
+    the file - and everything (findings, diagnostics) that references them -
+    stays correct."""
+    match = _DEAD_TRUE_FALSE_SHIM_RE.search(source)
+    if match is None:
+        return source, []
+    line_no = source.count("\n", 0, match.start()) + 1
+    stripped = _DEAD_TRUE_FALSE_SHIM_RE.sub("", source, count=1)
+    finding = Py2Finding(
+        construct_name="dead_true_false_shim",
+        line=line_no,
+        col=0,
+        fixer_name=None,
+        needs_llm=False,
+        detail=(
+            "Removed a Python 2.2-era `if not hasattr(__builtins__, 'True'): "
+            "True, False = 1, 0` compatibility shim: dead code on every real "
+            "interpreter (True/False always exist as builtins), and "
+            "unconditionally a SyntaxError under Python 3 regardless (True/"
+            "False are reserved keywords there, never valid assignment "
+            "targets)."
+        ),
+    )
+    return stripped, [finding]
 
 
 def find_lib2to3_findings(source: str) -> list[Py2Finding]:

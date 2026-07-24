@@ -9,6 +9,7 @@ from shiftcode.pipeline.dependencies import ClosureFile
 from shiftcode.pipeline.verify.characterization_gate import (
     MAX_REPORTED_MISMATCHES,
     _module_dotted_name,
+    _values_equal,
     run_mode_c,
 )
 
@@ -30,6 +31,7 @@ class _ScriptedRuntime:
     # taken immediately, not deferred, since cwd is a TemporaryDirectory that
     # gets deleted once the caller's `with` block exits.
     captured_tree: dict[str, str] | None = None
+    stderr_outputs: list[str] | None = None
 
     def run_script(self, cwd, script_rel_path, *, timeout=30):
         self.captured_tree = {str(p.relative_to(cwd)): p.read_text() for p in cwd.rglob("*") if p.is_file()}
@@ -39,8 +41,9 @@ class _ScriptedRuntime:
         # asserting on `calls` shouldn't need to hand-count exactly that many
         # scripted responses.
         stdout = self.outputs[self.calls % len(self.outputs)]
+        stderr = self.stderr_outputs[self.calls % len(self.stderr_outputs)] if self.stderr_outputs else ""
         self.calls += 1
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr=stderr)
 
 
 CASES = [
@@ -150,6 +153,61 @@ def test_run_mode_c_falls_back_to_string_comparison_for_non_literal_reprs():
     )
 
     assert result.outcome == GateOutcome.PASS
+
+
+def test_run_mode_c_surfaces_stderr_when_one_side_crashes_before_printing_anything():
+    """Real, confirmed case (argcomplete/completers.py): empty stdout with no
+    RESULT:/EXCEPTION: prefix at all previously looked exactly like a real
+    behavioral difference, when the actual cause was a transitive import
+    crash elsewhere in the closure (a sibling __init__.py's own unrelated
+    bug) - the real cause was only visible on stderr, which run_mode_c never
+    surfaced at all until now."""
+    py2 = _ScriptedRuntime(outputs=["RESULT:<generator object <genexpr> at 0x1>\n"])
+    py3 = _ScriptedRuntime(
+        outputs=[""],
+        stderr_outputs=["ModuleNotFoundError: No module named 'pipes'\n"],
+    )
+
+    result = run_mode_c(
+        module_filename="completers.py",
+        module_source_py2="x",
+        module_source_py3="x",
+        test_plan_cases=CASES,
+        py2_runtime=py2,
+        py3_runtime=py3,
+        evidence_source="llm_inference",
+    )
+
+    assert result.outcome == GateOutcome.FAIL
+    assert "py3 stderr=" in result.detail
+    assert "ModuleNotFoundError: No module named" in result.detail
+
+
+def test_values_equal_ignores_memory_addresses_in_default_object_reprs():
+    """Real, confirmed case (a class-method characterization run against
+    blinker's actual code): two SEPARATE interpreter processes will never
+    share a memory address, py2 vs py3 or not - comparing default object
+    reprs verbatim was a pure false-mismatch source, unrelated to any real
+    behavior difference."""
+    py2_val = "<blinker.base.NamedSignal object at 0xffff93dc60d0; 'abc'>"
+    py3_val = "<blinker.base.NamedSignal object at 0xffffb10186e0; 'abc'>"
+    assert _values_equal(py2_val, py3_val) is True
+
+
+def test_values_equal_still_catches_a_real_difference_hidden_past_the_address():
+    py2_val = "<blinker.base.NamedSignal object at 0xffff93dc60d0; 'abc'>"
+    py3_val = "<blinker.base.NamedSignal object at 0xffffb10186e0; 'xyz'>"
+    assert _values_equal(py2_val, py3_val) is False
+
+
+def test_values_equal_ignores_generator_repr_qualified_name_difference():
+    """Real, confirmed case: Python 3 added the generator's qualified name to
+    its own repr (`Signal.receivers_for`); Python 2's repr never had it
+    (`receivers_for`) - a real repr-FORMAT change between versions, not a
+    behavior difference."""
+    py2_val = "<generator object receivers_for at 0xffffa38a44b0>"
+    py3_val = "<generator object Signal.receivers_for at 0xffff8065a790>"
+    assert _values_equal(py2_val, py3_val) is True
 
 
 def test_run_mode_c_matches_exceptions_by_type_not_message():
@@ -318,3 +376,76 @@ def test_run_mode_c_writes_closure_once_and_reuses_across_cases():
     assert py2.captured_tree["mypkg/helpers.py"] == "py2 helper\n"
     assert py3.captured_tree["mypkg/helpers.py"] == "py3 helper\n"
     assert py2.calls == 2 and py3.calls == 2
+
+
+def test_run_mode_c_class_method_case_constructs_then_calls():
+    """Class-only files (all public logic in methods, no top-level functions
+    - e.g. a real blinker/base.py or argcomplete/my_argparse.py) previously
+    had nothing for Mode C to characterize at all. A class_name-bearing
+    TestCase builds an instance first, then calls the method on it."""
+    case = TestCase(
+        function_name="resize",
+        args_literal="(4,)",
+        class_name="Widget",
+        constructor_args_literal="(10,)",
+        rationale="typical",
+    )
+    py2 = _ScriptedRuntime(outputs=["RESULT:14\n"])
+    py3 = _ScriptedRuntime(outputs=["RESULT:14\n"])
+
+    result = run_mode_c(
+        module_filename="widgets.py",
+        module_source_py2="class Widget:\n    def __init__(self, w):\n        self.w = w\n    def resize(self, d):\n        return self.w + d\n",
+        module_source_py3="class Widget:\n    def __init__(self, w):\n        self.w = w\n    def resize(self, d):\n        return self.w + d\n",
+        test_plan_cases=[case],
+        py2_runtime=py2,
+        py3_runtime=py3,
+        evidence_source="llm_inference",
+    )
+
+    assert result.outcome == GateOutcome.PASS
+    driver = py2.captured_tree["_shiftcode_driver.py"]
+    assert "_ctor_args = (10,)" in driver
+    assert "_inst = _mod.Widget(*_ctor_args)" in driver
+    assert "_inst.resize(*_args)" in driver
+
+
+def test_run_mode_c_class_method_case_defaults_constructor_args_to_empty():
+    case = TestCase(function_name="ping", args_literal="()", class_name="Server", rationale="typical")
+    py2 = _ScriptedRuntime(outputs=["RESULT:'pong'\n"])
+    py3 = _ScriptedRuntime(outputs=["RESULT:'pong'\n"])
+
+    result = run_mode_c(
+        module_filename="srv.py",
+        module_source_py2="class Server:\n    def ping(self):\n        return 'pong'\n",
+        module_source_py3="class Server:\n    def ping(self):\n        return 'pong'\n",
+        test_plan_cases=[case],
+        py2_runtime=py2,
+        py3_runtime=py3,
+        evidence_source="llm_inference",
+    )
+
+    assert result.outcome == GateOutcome.PASS
+    driver = py2.captured_tree["_shiftcode_driver.py"]
+    assert "_ctor_args = ()" in driver
+    assert "_inst = _mod.Server(*_ctor_args)" in driver
+
+
+def test_run_mode_c_class_method_case_catches_a_real_mismatch():
+    case = TestCase(
+        function_name="resize", args_literal="(4,)", class_name="Widget", constructor_args_literal="(10,)", rationale="typical"
+    )
+    py2 = _ScriptedRuntime(outputs=["RESULT:14\n"])
+    py3 = _ScriptedRuntime(outputs=["RESULT:99\n"])  # real behavior difference
+
+    result = run_mode_c(
+        module_filename="widgets.py",
+        module_source_py2="class Widget: pass\n",
+        module_source_py3="class Widget: pass\n",
+        test_plan_cases=[case],
+        py2_runtime=py2,
+        py3_runtime=py3,
+        evidence_source="llm_inference",
+    )
+
+    assert result.outcome == GateOutcome.FAIL

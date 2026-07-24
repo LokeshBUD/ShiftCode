@@ -108,3 +108,21 @@ recordings_dir = "my_recordings"
 
     cfg_cli = load_config(project_root=tmp_path, cli_recordings_dir="other_recordings")
     assert cfg_cli.recordings_dir == "other_recordings"  # explicit CLI override wins over pyproject
+
+
+def test_checkpoint_dir_from_pyproject_and_cli_override(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[tool.shiftcode]
+checkpoint_dir = "my_checkpoints"
+"""
+    )
+    cfg = load_config(project_root=tmp_path)
+    assert cfg.checkpoint_dir == "my_checkpoints"
+
+    cfg_cli = load_config(project_root=tmp_path, cli_checkpoint_dir="other_checkpoints")
+    assert cfg_cli.checkpoint_dir == "other_checkpoints"  # explicit CLI override wins over pyproject
+
+
+def test_checkpoint_dir_none_by_default(tmp_path):
+    assert load_config(project_root=tmp_path).checkpoint_dir is None

@@ -174,6 +174,27 @@ combination across a file's functions), so a human reviewing a
 `VERIFIED_INFERRED` result can see exactly how strong the underlying
 evidence was, not just that "something" passed.
 
+### Class-method characterization
+
+Originally MVP-scoped to top-level functions only — `top_level_function_defs`
+structurally excludes classes, since characterizing a method needs an
+instance to call it on, not just a call. `top_level_class_defs`/`class_init`/
+`public_methods` (`pipeline/call_sites.py`) extend discovery to public
+classes, their `__init__` (if any), and their public (non-underscore, so
+dunders too — including `__call__` — are excluded by the same rule as
+functions) methods. `TestCase` carries this as two additional optional
+fields, `class_name`/`constructor_args_literal` (`None` for a plain function
+case — byte-for-byte the same behavior as before this existed): when set,
+`_build_driver_script` constructs `ClassName(*constructor_args)` first, then
+calls the method on that instance, instead of calling a module-level
+function directly. The same evidence-priority order and `ast.literal_eval`-only
+safety gate apply to constructor args exactly as they do to any other
+argument.
+
+Differential fuzzing (below) stays function-only for now — methods always go
+through the plain (non-fuzzed) example-proposal path regardless of
+`characterization_fuzz_cases`, a deliberate scope cut, not an oversight.
+
 ### Differential fuzzing (optional)
 
 Off by default (`characterization_fuzz_cases: int = 0` — additive, byte-for-byte

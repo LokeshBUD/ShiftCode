@@ -10,6 +10,112 @@ Format: newest first.
 
 ---
 
+## 36. Mode C discarded stderr entirely - a transitive import crash on one side was indistinguishable from a genuine behavioral difference
+
+**Found via:** finally diagnosing `argcomplete/completers.py`'s `EnvironCompleter` "mismatch" - flagged as an open, undiagnosed lead across 3 separate stress-test rounds (entries 13, 15, 16 in `docs/stress-test-log.md`) without ever being root-caused. `py2` returned a real generator repr; `py3` returned a bare empty string, with no `RESULT:`/`EXCEPTION:` prefix at all - looked exactly like the function itself behaved differently.
+
+**Root cause:** it wasn't a real difference at all. `argcomplete/completers.py` is a package submodule (`argcomplete.completers`), so importing it also imports `argcomplete/__init__.py` first - real Python import semantics. That `__init__.py`'s own final candidate still had the *unresolved* `import pipes` repair failure documented in `docs/bug-log.md` (a confirmed, reproducible model-capability ceiling, not fixable by raising `max_repair_attempts` - see entry 16 in `docs/stress-test-log.md`). On Python 3, importing `argcomplete.completers` transitively crashed at `argcomplete/__init__.py`'s own `import pipes` line, before `EnvironCompleter` was ever called - a real `ModuleNotFoundError`, with its traceback going to stderr. `_run_case_in` (`characterization_gate.py`), reused by Mode R too, only ever read `proc.stdout` - stderr was silently discarded, so the crash was invisible in the report; all that showed was an empty stdout that read exactly like "the function returns something different on py3."
+
+**Fix:** `_run_case_in` now returns `(stdout, stderr)` instead of just `stdout`. `run_mode_c`'s mismatch message includes whichever side's stderr when that side's stdout was empty (the specific shape a crash-before-any-print produces) - narrow and additive, only fires in exactly that situation, never changes the actual PASS/FAIL comparison logic itself (still stdout-kind-based, unchanged). `recording_gate.py` (Mode R, which reuses the same helper) updated to match the new return shape.
+
+**Status:** fixed, unit-tested (a scripted crash-shaped case - empty stdout, real stderr - confirmed to surface in the mismatch detail), confirmed live: reproduced the exact real failure by hand against the real `argcomplete` extraction, tracing it through `argcomplete/__init__.py`'s actual final candidate source to the real, unresolved `import pipes` line. `EnvironCompleter` itself has no real py2/py3 behavior difference - confirmed directly by running its driver script standalone, bypassing the broken import chain: identical generator-returning output on both interpreters (correctly normalized as equal by bug #33's fix). No further code changes needed for `completers.py` itself; the underlying `import pipes` repair failure remains a documented, accepted model-capability limit, not something this fix (or any further ShiftCode change) resolves.
+
+---
+
+## 35. A file with zero judgment-requiring findings got exactly one verification attempt, no retry even on a genuinely fixable failure
+
+**Found via:** noted as a real, still-open gap ("Known limitations" in README.md, and this entry's own placeholder) since early in the project - closed now as part of a deliberate pass through every remaining open item once the 3 rule-based fixes (#30-#33) landed.
+
+**Root cause:** `migrate_file`'s fast path for a file with an empty `plan.steps` (nothing the Planner flagged as needing judgment) verified the deterministic-only candidate once, then returned immediately on ANY failure - including a genuinely actionable one (a real behavior/determinism mismatch, or even a syntax problem in the deterministic output itself), never giving the Auditor a chance to diagnose it or the Refactorer a chance to fix it. "Nothing the Planner flagged" only means lib2to3's own fixers didn't know to flag anything - it doesn't mean nothing is actually wrong; a real behavior gate can still fail for reasons the deterministic layer had no way to see coming.
+
+**Fix:** `migrate_file` (`pipeline/repair.py`) now runs one unified loop instead of two separate code paths - the free first check (no Refactorer call, zero LLM cost) still happens exactly as before, but only stops immediately when the result is `UNVERIFIED` (a structurally unverifiable environment - no py2 runtime, no test suite/entry point/characterization - where retrying genuinely cannot help) or already passing. A `RETRY`-classified result (syntax/behavior/determinism actually failed) now falls through into the exact same bounded Auditor↔Refactorer loop every other file gets, seeded with an Auditor diagnosis of that first failure. This wasn't new machinery to build - the Refactorer's own prompt already renders `"(no plan steps - nothing for you to change)"` for an empty plan and explicitly instructs treating Auditor hints as "authoritative corrections to your previous attempt"; that combination was already designed to make sense together, just never reachable.
+
+**Status:** fixed, unit-tested (a deliberately-broken `deterministic_output` with an empty plan now correctly retries and recovers, and the untouched UNVERIFIED-immediate-stop case is confirmed to still record zero repair-attempt history, byte-for-byte the same as before), confirmed live: a real re-run against `toolz` shows `itertoolz/core.py` now genuinely exhausting 3 repair attempts on a real Mode A mismatch instead of giving up after the first free check, while files that hit a genuinely unverifiable environment (`test_core.py`, `test_recipes.py`, `test_curried.py` - no standalone entry point) correctly still stop immediately with no wasted attempts.
+
+---
+
+## 34. Mode B's stdout/stderr/exit-code equality check false-failed when Python 3 emitted an interpreter-level warning Python 2 doesn't
+
+**Found via:** re-validating `html2text.py` after fixing bug #31 (the dead shim removal) - the file no longer hit that `SyntaxError`, but still failed Mode B, with identical stdout and exit code (0/0) on both sides.
+
+**Root cause:** `run_mode_b` (`behavior_gate.py`) required `stdout`, `stderr`, and `returncode` to match exactly for a PASS. Python 3 emits interpreter-level warnings (here: a `SyntaxWarning` for an invalid string escape sequence, `'\s+'`) on stderr at import/compile time that Python 2 simply never emits - real, harmless interpreter noise, unrelated to whether the migrated code actually behaves the same. A behaviorally-identical migration could fail Mode B purely because Python 3 itself got chattier, not because anything about the migration was wrong.
+
+**Fix:** new `_strip_interpreter_warning_noise` helper (`behavior_gate.py`) - regex-matches Python's own `warnings.formatwarning()` output shape (`"{file}:{line}: {Category}: {message}"` plus an optional 2-space-indented echo of the source line) for a fixed, narrow list of built-in warning categories (`SyntaxWarning`, `DeprecationWarning`, etc.), and strips only those blocks before the stderr equality check. Deliberately narrow - a real error message a program itself prints to stderr doesn't match this shape and still causes a real `FAIL`. The raw, unstripped stderr is still shown in full in the `FAIL` detail string for debugging - only the PASS/FAIL decision itself uses the normalized version.
+
+**Status:** fixed, unit-tested against the exact real captured stderr text from the live run that found this (`test_run_mode_b_passes_when_only_stderr_differs_by_a_py3_warning`), confirmed a real difference hidden past the noise is still caught (`test_run_mode_b_still_fails_on_a_real_stderr_difference`). `html2text.py` itself doesn't yet reach a verified tier even with this fix - a live re-run surfaced a further, unrelated, genuine issue (the module needs `sgmllib3`, a Python 3 port of a removed stdlib module, which isn't provisioned into the sandbox) - a real dependency gap, not a comparison bug, and likely not fixable by ShiftCode itself (same category as the 9 "not fixable by either lever" files from the earlier breakdown).
+
+---
+
+## 33. `_values_equal`'s non-literal fallback compared default object/generator reprs verbatim, embedding a real memory address that can never match across two separate interpreter processes
+
+**Found via:** the first real class-method characterization run against blinker's actual `Signal.receivers_for`/`signal()` (see #32) - every case mismatched, all with the exact same shape: `py2 returned '<... object at 0xAAA>', py3 returned '<... object at 0xBBB>'`, i.e. identical content, different addresses.
+
+**Root cause:** `_values_equal` (`characterization_gate.py`) falls back to plain string comparison when a repr isn't `ast.literal_eval`-parseable (e.g. a custom object's default `__repr__`, or a generator). Default object repr embeds the object's real memory address - which was *never* going to match between the py2 sandbox process and the separate py3 sandbox process, regardless of whether the migration is correct. Separately, Python 3 added the generator's qualified name to its own repr (`<generator object Signal.receivers_for at 0x...>`) that Python 2's repr never had (`<generator object receivers_for at 0x...>`) - a real repr-*format* change between language versions, not a behavior difference. Both were pure false-mismatch noise, unrelated to whether the migrated code actually behaves the same. This almost certainly affected any earlier Mode C run characterizing a function/method that returns a plain object or a generator - it simply had no real-world trigger until a case shaped that way got run.
+
+**Fix:** new `_normalize_nonliteral_repr` helper, applied on both sides before the string-equality fallback in `_values_equal` - collapses any `<generator object ... at 0x...>` to a single placeholder, and replaces every remaining hex address with a fixed placeholder. Only touches the non-literal fallback path; the literal-value comparison (the vast majority of real correctness signal) is untouched. Confirmed both that real noise (address-only, and generator-qualifier-only differences) is now ignored, and that a genuine difference hidden past the noise (e.g. a different literal payload after the address) is still caught.
+
+**Status:** fixed, unit-tested, re-confirmed live: blinker/base.py went from 4/10 to 6/6 Mode C cases passing and `VERIFIED_INFERRED` once this landed.
+
+---
+
+## 32. Mode C only ever characterized top-level functions - any class-only file (all public logic in methods) got nothing to characterize at all
+
+**Found via:** two real stress-test files landing on `NEEDS_REVIEW` purely because `top_level_function_defs` structurally excludes classes by design (`call_sites.py`'s own MVP-scope docstring) - `blinker/base.py` (`Signal.receivers_for` and friends) and `argcomplete/my_argparse.py`.
+
+**Root cause:** characterizing a method requires two things a plain function doesn't: an instance to call it on (constructor args for `ClassName(...)`), and the method call itself (`instance.method_name(...)`) - genuinely more design surface than a direct `_mod.function_name(*args)` call, so it was explicitly deferred at MVP time.
+
+**Fix:** `TestCase` gained two optional fields, `class_name`/`constructor_args_literal` (`None` for a plain function case - byte-for-byte the same behavior as before) - reused instead of a parallel model hierarchy, since a method case only needs 2 extra pieces of data over a function case. New `top_level_class_defs`/`class_init`/`public_methods` (`call_sites.py`) discover public classes, their `__init__` (if any), and their public methods (same "not underscore-prefixed" filter as functions - dunders, including `__call__`, excluded by the same rule). `_build_driver_script` (`characterization_gate.py`) gained a branch: when `class_name` is set, construct `_inst = _mod.ClassName(*ctor_args)` then call `_inst.method_name(*args)`, instead of calling the module-level function directly. The Characterization prompt now renders a method's class `__init__` alongside the method itself, and instructs the model to propose constructor args the same way it proposes any other arguments. `_neighbor_variants` (the differential-fuzzing shrinking analog) also had to carry `class_name`/`constructor_args_literal` through, or a method's boundary-nudged variants would have silently probed the wrong thing (calling the method name as if it were a top-level function).
+
+Differential fuzzing (`propose_fuzz_seeds`/`FunctionSeedPlan`) deliberately stays function-only for now - methods always get the plain (non-fuzzed) `propose_tests` path regardless of `characterization_fuzz_cases`, a real scope cut, not an oversight.
+
+**Status:** fixed, unit-tested, confirmed live: `blinker/base.py` went from `NEEDS_REVIEW` (nothing to characterize) to `VERIFIED_INFERRED` (6/6 cases, after #33's fix also landed). `argcomplete/my_argparse.py` remains `UNVERIFIED` - but now for an honest, correct reason: its one class (`IntrospectiveArgumentParser`) has exactly one method, `_parse_known_args`, which is genuinely private (an internal override of argparse's own API) and correctly excluded, not a gap in this fix. The underlying machinery is confirmed working on a second, independent real file too: `argcomplete/completers.py`'s `ChoicesCompleter` class is now discovered (though its only method, `__call__`, is a dunder and correctly excluded by the same filter).
+
+---
+
+## 31. The dead py2.2 `True`/`False` builtin shim (bug #14) got a clear diagnosis but was never actually removed - html2text.py stayed `NEEDS_REVIEW` forever on this construct alone
+
+**Found via:** scoping out a real fix for the exact construct bug #14 diagnosed (`if not hasattr(__builtins__, 'True'): True, False = 1, 0`) instead of leaving it at "clear error message" permanently, per the plan to address every rule-based fix identified from the 14 open `NEEDS_REVIEW` files.
+
+**Root cause:** the construct is unconditionally dead code on every real interpreter (py2.3+ and all of py3 always have `True`/`False`, so the guarded body never executes) - but it's a genuine Python 3 `SyntaxError` (`True`/`False` are reserved keywords, never valid assignment targets), and it survives `deterministic_transform` unchanged (lib2to3 has no fixer for it). That makes it structurally unlike every other detector in `analyze.py`: those all walk an AST that already parsed successfully; here there's no tree to walk until this exact line is gone, since `ast.parse()` itself fails first.
+
+**Fix:** new `strip_dead_true_false_shim` (`analyze.py`) - a pre-parse *textual* strip (regex-matched, single-line-form only, tolerant of quote style), not an AST-based detector, following the one existing precedent for this shape of fix: `ingest.py`'s own trailing-newline normalization. Runs before `find_lib2to3_findings`/`deterministic_transform`, mutating `original_source` in place and emitting a `needs_llm=False` `Py2Finding` so the report stays honest about what happened. The matched line is replaced with a blank line (not deleted outright), so every other line number in the file stays correct.
+
+**Status:** fixed, unit-tested, confirmed live: `html2text.py` no longer hits the `SyntaxError` backstop at all - it now proceeds into a real repair loop. It still doesn't fully verify, but for a completely different, unrelated reason (see the Mode B stderr-comparison gap noted in stress-test-log.md - flagged, not yet fixed, a separate design decision).
+
+---
+
+## 30. Dependency-closure resolution parsed raw (possibly py2-only) source, silently losing every import edge for any importer using common py2-only syntax like a bare `print` statement
+
+**Found via:** re-validating `docopt/example.py` (originally attributed to "Mode B's single-file isolation," before any dependency-closure machinery existed at all - see stress-test-log.md). After bugs #13/#15/#21/#22 built real multi-file closures, `example.py` *still* failed with `ImportError: No module named docopt` even though `docopt.py` sits right next to it and `resolve_local_imports` should have found `from docopt import docopt`.
+
+**Root cause:** `resolve_local_imports` (`dependencies.py`) called `ast.parse(file_unit.original_source)` - the raw, untouched py2 source - to find import statements. `example.py`'s original source has `print options` (a Python 2 print *statement*), which is a `SyntaxError` under Python 3's grammar. The function's own `except SyntaxError: return []` degraded this to *zero* import edges rather than crashing - safe, but silently wrong in scope: the `from docopt import docopt` line was never reached because parsing failed before that point. Any importer file containing print statements, `except E, e:`, or similar py2-only syntax would have this same silent gap, regardless of which library it belonged to.
+
+**Fix:** `resolve_local_imports` now prefers `file_unit.deterministic_output` (the lib2to3-transformed, real py3-parseable candidate - already computed and available for every file by the time this runs, since Phase A completes for every file before Phase B's closure computation begins) over `original_source`, falling back to `original_source` only when `deterministic_output` is `None` (e.g. a synthetic `FileUnit` in a test). Confirmed live: `docopt/example.py`'s py2-side sandbox run went from a raw `ImportError` to real, correct output (`Options(count=False, ...)` etc.) once the sibling import actually resolved.
+
+**Status:** fixed, confirmed live, zero unit-test regressions (275/275 unchanged before this fix, still 275/275 after). `example.py` itself still doesn't reach a verified tier - blocked by an unrelated, pre-existing issue (`docopt.py`'s own Refactorer repair corrupting indentation while reverting a `long`→`int` mechanical-fixer collision, reproducibly identical across repair attempts and across separate runs - a model-repair-quality gap, not a closure gap; candidate for the model-limit investigation, not this fix).
+
+---
+
+## 29. Mode R's recording wire format silently coerced non-string dict keys, and collapsed the tuple/list distinction
+
+**Found via:** stress-testing Mode R for the first time against a real third-party library (`pytoolz/toolz`'s `dicttoolz.core.merge`), not the small hand-written example it shipped with. Recorded real calls like `merge({1: 'one'}, {2: 'two'})` under real Python 2 - the recording on disk came back as `{"1": "one", "2": "two"}`, a genuinely different dict (string keys, not int keys) than the real value that was actually returned.
+
+**Root cause:** the original recorder (`recorder.py`) serialized args/kwargs/result with `json.dumps` on the raw Python values. JSON has no non-string object-key type - `json.dumps({1: 'one'})` silently stringifies the key with no error or warning. The same design also silently collapsed the tuple/list distinction (a function returning a real tuple would round-trip as a JSON array, indistinguishable from a list). Either would cause a **false mismatch** at replay time - the candidate could be perfectly correct and still get flagged as broken, purely because of the recording format's own lossy encoding, nothing to do with any real behavior difference.
+
+**Fix:** both `recorder.py` and `recording_loader.py` now use `repr()` (validated by round-tripping through `ast.literal_eval`, the same check this codebase's existing `args_literal`/`args_repr` machinery already uses everywhere else) instead of raw JSON values for the args/kwargs/result fields - only the outer envelope (function name, module, timestamp) is plain JSON. `repr()`/`literal_eval` round-trips losslessly for anything in the literal-safe universe, so this can't lose key-type or tuple/list information the way JSON structurally can. Confirmed via a real regression test (recording an int-keyed dict, confirming the keys come back as real ints) and re-validated live against the real `toolz` recording: 5/5 real recorded `merge()` calls now correctly match toolz's real implementation, and 4/5 correctly fail against a deliberately broken candidate (the 5th - a single-dict merge - is correctly unaffected by the specific bug introduced, real per-case signal, not a blanket failure).
+
+---
+
+## 28. `TestCase.function_name` had no safety validation at all - spliced directly into driver-script source code
+
+**Found via:** building Mode R's `recording_loader.py` (docs/verification.md), which needed to validate `function_name` for a genuinely new untrusted input (a recording `.jsonl` file, possibly produced on a different machine at an earlier time). Adding that check surfaced that the *pre-existing* LLM-facing path - `TestCase.function_name`, used by every Mode C case regardless of origin (`propose_tests`, `propose_fuzz_seeds`/`expand_function_seeds`) - had never had an equivalent check at all, since it had only ever been implicitly trusted as coming from an LLM response.
+
+**Root cause:** `characterization_gate.py`'s `_build_driver_script` splices `case.function_name` directly into driver-script SOURCE CODE (`f"_mod.{case.function_name}(*_args)"`). `args_literal` is defended by `ast.literal_eval`'s structural inability to evaluate a function call or attribute access - but nothing equivalent ever existed for `function_name`. A manipulated or malicious model response (or a future untrusted input path along these same lines) putting something like `"x); __import__('os').system('...'); ("` in this field would have spliced straight into real, executable driver-script code.
+
+**Fix:** a `field_validator` directly on `TestCase.function_name` (`models/agent_io.py`) - enforces a plain identifier (`^[A-Za-z_][A-Za-z0-9_]*$`), matching what a real top-level function's name always structurally is. Centralized at the model level rather than scattered per-gate checks, so it applies transitively to every `TestCase`, however it was constructed (LLM output, fuzz expansion, or the new recording-derived path) - can never reject a legitimate case, only an injection attempt. Confirmed via a real injection string (`"x); __import__('os').system('echo pwned'); ("`) correctly rejected at construction time.
+
+---
+
 ## 27. `import pipes` produced zero findings - removed in Python 3.13 with no fixer anywhere, crashing the whole module's import
 
 **Found via:** `kislyuk/argcomplete` @ `f6a7bf4`, same run as #26. Once #26's test-pairing fix routed `argcomplete/__init__.py` to real Mode A, it hit `ModuleNotFoundError: No module named 'pipes'` during test collection - the module imports `pipes` as part of a multi-name `import` statement, crashing the ENTIRE module's import (not just wherever `pipes` is used), the same "one missing symbol takes down everything" failure shape as bug #7's `types.UnicodeType`.
@@ -332,10 +438,8 @@ real: a file with *some* findings gets up to 3 attempts and an Auditor
 diagnosis on any failure type; a file with *zero* findings gets exactly one
 shot, even for a failure category that might genuinely be fixable.
 
-**Status:** found, not yet fixed - lower priority than #5 (which is the
-actual blocker on 2 of 3 external stress tests so far). Worth revisiting
-once #5 lands and this path gets exercised on files where the failure
-*isn't* an unfixable environment issue.
+**Status:** fixed - see #35 for the actual fix (the same gap described here,
+closed as part of a deliberate pass through every remaining open item).
 
 ---
 

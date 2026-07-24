@@ -1,4 +1,5 @@
 import ast
+import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -11,6 +12,37 @@ from shiftcode.pipeline.transform.deterministic import (
     deterministic_transform,
 )
 from shiftcode.pipeline.verify.sandbox_runtime import SandboxRuntime, write_sandbox_tree
+
+# Real, confirmed case (a real stress test against aaronsw/html2text): Python
+# 3 emits an interpreter-level warning (e.g. SyntaxWarning for an invalid
+# string escape sequence) on stderr at import/compile time that Python 2
+# never emits, even when both sides produce byte-identical stdout and the
+# same exit code - a false FAIL purely from interpreter noise, unrelated to
+# any real program behavior difference. Matches Python's own
+# warnings.formatwarning() output shape exactly: "{file}:{line}: {Category}:
+# {message}\n" optionally followed by a 2-space-indented echo of the
+# offending source line. Deliberately narrow - only known Python builtin
+# warning categories, never arbitrary program output - so a real error a
+# program itself prints to stderr still causes a real FAIL.
+_PY_WARNING_CATEGORIES = (
+    "SyntaxWarning",
+    "DeprecationWarning",
+    "PendingDeprecationWarning",
+    "FutureWarning",
+    "RuntimeWarning",
+    "ResourceWarning",
+    "ImportWarning",
+    "UnicodeWarning",
+    "BytesWarning",
+)
+_PY_WARNING_BLOCK_RE = re.compile(
+    r"^[^\n:]*:\d+: (?:" + "|".join(_PY_WARNING_CATEGORIES) + r"): [^\n]*\n(?:  [^\n]*\n)?",
+    re.MULTILINE,
+)
+
+
+def _strip_interpreter_warning_noise(stderr: str) -> str:
+    return _PY_WARNING_BLOCK_RE.sub("", stderr)
 
 
 def _default_local_py3() -> SandboxRuntime:
@@ -244,7 +276,7 @@ def run_mode_b(
 
     if (
         py2_proc.stdout == py3_proc.stdout
-        and py2_proc.stderr == py3_proc.stderr
+        and _strip_interpreter_warning_noise(py2_proc.stderr) == _strip_interpreter_warning_noise(py3_proc.stderr)
         and py2_proc.returncode == py3_proc.returncode
     ):
         return BehaviorResult(outcome=GateOutcome.PASS, mode="B", detail="stdout/stderr/exit code identical")
@@ -254,6 +286,7 @@ def run_mode_b(
         mode="B",
         detail=(
             f"--- py2 stdout ---\n{py2_proc.stdout}\n--- py3 stdout ---\n{py3_proc.stdout}\n"
+            f"--- py2 stderr ---\n{py2_proc.stderr}\n--- py3 stderr ---\n{py3_proc.stderr}\n"
             f"py2 exit={py2_proc.returncode} py3 exit={py3_proc.returncode}"
         ),
     )

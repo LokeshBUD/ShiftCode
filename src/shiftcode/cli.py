@@ -42,6 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="directory of *.jsonl recordings (see `shiftcode init-recorder`) for Mode R verification",
     )
+    migrate.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help=(
+            "write a per-file checkpoint here as each file finishes, and skip re-processing "
+            "any file whose source hasn't changed on a later run pointed at the same directory "
+            "- survives a killed/crashed run without losing already-verified files"
+        ),
+    )
     migrate.add_argument("--dry-run", action="store_true")
     migrate.add_argument("--in-place", action="store_true")
     migrate.add_argument("--strict", action="store_true")
@@ -229,6 +238,7 @@ def main(argv: list[str] | None = None) -> int:
         cli_characterization_fuzz_cases=args.characterization_fuzz_cases,
         cli_capture_repair_history=args.capture_repair_history,
         cli_recordings_dir=args.recordings_dir,
+        cli_checkpoint_dir=args.checkpoint_dir,
     )
     if args.no_install_deps:
         config = replace(config, install_project_dependencies=False)

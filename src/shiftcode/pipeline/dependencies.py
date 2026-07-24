@@ -100,8 +100,19 @@ def resolve_local_imports(
     if path_lookup is None:
         path_lookup = {fu.path: fu for fu in all_file_units}
 
+    # Real bug, found via a real stress test against docopt/example.py:
+    # original_source is raw, possibly py2-only syntax (e.g. a bare `print x`
+    # statement) - stdlib `ast.parse` rejects that under Python 3's grammar,
+    # so this used to silently degrade to zero import edges for any importer
+    # using such syntax, even though its `from docopt import docopt` line was
+    # sitting right there. By the time this runs (Phase B, after Phase A
+    # completes for every file), deterministic_output is already the
+    # lib2to3-transformed, real py3-parseable candidate - parse that instead
+    # when available, falling back to original_source only if it isn't (e.g.
+    # a synthetic FileUnit in a test, or a file whose own Phase A never ran).
+    source = file_unit.deterministic_output or file_unit.original_source
     try:
-        tree = ast.parse(file_unit.original_source)
+        tree = ast.parse(source)
     except SyntaxError:
         return []
 

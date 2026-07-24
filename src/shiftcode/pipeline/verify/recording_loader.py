@@ -42,16 +42,25 @@ def _entry_to_case(entry: dict) -> RecordedCase | None:
     # positional-only contract - no established literal representation for
     # keyword args exists anywhere else in this codebase yet. A recorded
     # call that used kwargs is dropped, not guessed at.
-    if entry.get("kwargs"):
+    if entry.get("kwargs_repr"):
         return None
 
-    args = entry.get("args")
-    if not isinstance(args, list):
+    # args_repr/result_repr are already repr() output written by
+    # recorder.py (real bug found via a real stress test against
+    # `pytoolz/toolz`'s `merge()`: storing raw JSON values instead - as an
+    # earlier version of both this loader and the recorder did - silently
+    # corrupted non-string dict keys, since JSON coerces every dict key to
+    # a string on the wire, and collapsed the tuple/list distinction. Using
+    # repr() end to end avoids both losslessly). Still re-validated here,
+    # not trusted just because the recorder already checked - a recording
+    # file is a separate, later-trusted-less artifact by the time it's
+    # loaded, same zero-trust posture as everywhere else in this codebase.
+    args_literal = entry.get("args_repr")
+    if not isinstance(args_literal, str):
         return None
     try:
-        args_literal = repr(tuple(args))
         validate_args_literal(args_literal)
-    except (UnsafeTestCaseError, TypeError):
+    except UnsafeTestCaseError:
         return None
 
     exception = entry.get("exception")
@@ -65,8 +74,10 @@ def _entry_to_case(entry: dict) -> RecordedCase | None:
             module=entry.get("module"),
         )
 
+    result_literal = entry.get("result_repr")
+    if not isinstance(result_literal, str):
+        return None
     try:
-        result_literal = repr(entry.get("result"))
         validate_seed_literal(result_literal)
     except UnsafeTestCaseError:
         return None
