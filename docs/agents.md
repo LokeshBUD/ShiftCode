@@ -6,6 +6,18 @@ parse failure, transient-network retry with backoff, and a regex/`ast`-based
 fallback parser for providers without native structured-output support. Five
 run inside a live migration; the sixth (Fixer-Rule) runs offline, standalone.
 
+| Agent | Where | Runs | Job |
+|---|---|---|---|
+| Transform Auditor | `agents/transform_auditor.py` | Once per file, right after the deterministic transform, before the Planner | Reviews the mechanical fixer output for silent semantic drift |
+| Planner | `agents/planner.py` | Once per file, only if there are `needs_llm=True` findings | Decides what should change and why — writes no code |
+| Refactorer | `agents/refactorer.py` | Once per repair attempt (up to `max_repair_attempts`, default 3) | Writes the actual patch as targeted `SymbolBlock`s |
+| Auditor | `agents/auditor.py` | Only when a verification gate fails, once per failed attempt | Diagnoses the specific failure, hands the Refactorer a targeted hint |
+| Characterization | `agents/characterization.py` | Once per file, only when Mode C applies (no test suite, no entry point) | Proposes input values to test with — never invents expected outputs |
+| Fixer-Rule | `agents/fixer_rule.py` | Offline, via `shiftcode suggest-fixer-rules`, once per captured confirmed repair | Generalizes one confirmed repair into a candidate permanent detector |
+
+Detail on each below: what it does, why it's built the way it is, and any
+real limitations found running it against real code.
+
 ## Transform Auditor
 
 **Where:** `agents/transform_auditor.py`. **Runs:** once per file,

@@ -5,6 +5,18 @@ security model underneath all of it. For what the resulting status labels
 mean as a *user*, see the "Outcome categories" section in `README.md` — this
 is the deep reference for how those results actually get produced.
 
+## The four behavior-gate modes, at a glance
+
+Tried in this priority order per file — the first one that applies wins.
+Full mechanics for each below.
+
+| Mode | Applies when | Needs a live py2 runtime? | Case-count semantics |
+|---|---|---|---|
+| A | A real test suite exists | Yes | `cases_run`/`cases_passed` = real pytest-discovered test count |
+| R | Recorded `(args → result)` data exists for this file's functions (Mode R, opt-in) | No — expected output was already captured live | `cases_run`/`cases_passed` = real recorded calls replayed |
+| B | No test suite, but has `if __name__ == "__main__":` | Yes | None — single script comparison, not a case count |
+| C | No test suite, no entry point (the common case for legacy library code) | Yes | `cases_run`/`cases_passed` = true total executed, including shrinking probes |
+
 ## Gate order
 
 1. **Syntax gate** (`pipeline/verify/syntax_gate.py`) — hard gate, always
@@ -280,20 +292,12 @@ deliberately *not* a synthesized 0-100 confidence score, which would risk
 implying a false precision/comparability across modes that don't actually
 measure the same thing:
 
-- **Mode A:** `cases_run` = the real `pytest`-discovered test count;
-  `cases_passed` = that minus however many outcome mismatches were found.
-  `None` on either vacuous-pass guard above — nothing real ran.
-- **Mode R:** `cases_run` = the number of real recorded calls replayed;
-  `cases_passed` accordingly. `None` when no recordings matched this file's
-  functions at all.
-- **Mode C:** `cases_run` = the *true* total executed, including any
-  neighbor-variant shrinking probes (not just the originally-proposed case
-  count); `cases_passed` accordingly. `None` when there were no valid cases
-  to run at all.
-- **Mode B:** always `None` — a single script's stdout/stderr/exit-code
-  comparison isn't a case count in the sense A/C's per-input comparisons
-  are; reporting a fabricated "1/1" would misleadingly imply a countable-cases
-  framing Mode B doesn't have.
+| Mode | `cases_run` | `None` when |
+|---|---|---|
+| A | Real `pytest`-discovered test count; `cases_passed` = that minus however many outcome mismatches were found | Either vacuous-pass guard above fires — nothing real ran |
+| R | Number of real recorded calls replayed; `cases_passed` accordingly | No recordings matched this file's functions at all |
+| C | The *true* total executed, including any neighbor-variant shrinking probes (not just the originally-proposed case count); `cases_passed` accordingly | No valid cases to run at all |
+| B | Always `None` | Always — a single script's stdout/stderr/exit-code comparison isn't a case count in the sense A/C's per-input comparisons are; a fabricated "1/1" would misleadingly imply a countable-cases framing Mode B doesn't have |
 
 Rendered in `to_text`/`to_console` as e.g. `206/209 cases passed (Mode A)`
 whenever `cases_run` is set, and included in the JSON report's `behavior`

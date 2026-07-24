@@ -46,11 +46,17 @@ one-off (e.g. a mislabeled error string), it's fine for it to be one-off —
 but that should be a conclusion reached after asking the generalization
 question, not by skipping it.
 
-**5. Log both directions.** `docs/bug-log.md`: symptom, root cause (as
-confirmed in step 3, not as first guessed), fix (or fix design, if not yet
-implemented), status. `docs/stress-test-log.md`: which library, what
-outcome, cross-linked to any bug numbers it surfaced. A crashed or blocked
-run gets logged too — the record's value is honesty, not a highlight reel.
+**5. Log both directions — index row plus full entry, in both files, every
+time.** `docs/bug-log.md`: an index-table row (one-line symptom, status) at
+the top, plus the full entry (symptom, root cause as confirmed in step 3 not
+as first guessed, fix or fix design, status) in the body. `docs/stress-test-log.md`:
+a one-line summary-table row (library, one-line outcome, bug numbers), plus
+a full "Entry detail" section (date, source/why this target, full outcome,
+bugs found, status). A crashed or blocked run gets logged too — the record's
+value is honesty, not a highlight reel. Neither file's row-only or
+detail-only is enough on its own — the row is how someone finds an entry,
+the detail is the actual record; both docs have their own "How to add an
+entry" section spelling this out if you need the exact shape.
 
 **6. Confirm, then confirm again on a *different* target.** After a fix
 lands: re-run the exact stress test that found the bug, to confirm the fix

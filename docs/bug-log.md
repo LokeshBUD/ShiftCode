@@ -6,7 +6,49 @@ is to find the class of bug that a hand-built fixture won't surface. Each
 entry: what was wrong, how it was found, the root cause, and what now catches
 this class of bug going forward (a code fix, a new gate, or a new agent).
 
-Format: newest first.
+Index below, newest first — jump to `#N` for the full write-up (found via,
+root cause, fix, status). Full entries follow in the same order.
+
+| # | Bug | Status |
+|---|---|---|
+| [36](#36-mode-c-discarded-stderr-entirely-a-transitive-import-crash-on-one-side-was-indistinguishable-from-a-genuine-behavioral-difference) | Mode C discarded stderr entirely — a transitive import crash looked identical to a real behavioral difference | Fixed |
+| [35](#35-a-file-with-zero-judgment-requiring-findings-got-exactly-one-verification-attempt-no-retry-even-on-a-genuinely-fixable-failure) | Zero-plan-step files got one verification attempt, no retry even on a fixable failure | Fixed |
+| [34](#34-mode-bs-stdoutstderrexit-code-equality-check-false-failed-when-python-3-emitted-an-interpreter-level-warning-python-2-doesnt) | Mode B false-failed on a Python-3-only interpreter warning (SyntaxWarning noise) | Fixed |
+| [33](#33-_values_equals-non-literal-fallback-compared-default-objectgenerator-reprs-verbatim-embedding-a-real-memory-address-that-can-never-match-across-two-separate-interpreter-processes) | `_values_equal` compared reprs with raw memory addresses baked in — can never match across processes | Fixed |
+| [32](#32-mode-c-only-ever-characterized-top-level-functions-any-class-only-file-all-public-logic-in-methods-got-nothing-to-characterize-at-all) | Mode C only characterized top-level functions — class-only files got nothing tested at all | Fixed |
+| [31](#31-the-dead-py22-truefalse-builtin-shim-bug-14-got-a-clear-diagnosis-but-was-never-actually-removed-html2textpy-stayed-needs_review-forever-on-this-construct-alone) | Dead py2.2 `True`/`False` shim (bug #14) got a diagnosis but was never actually removed | Fixed |
+| [30](#30-dependency-closure-resolution-parsed-raw-possibly-py2-only-source-silently-losing-every-import-edge-for-any-importer-using-common-py2-only-syntax-like-a-bare-print-statement) | Dependency-closure resolution silently lost import edges for any importer using a bare `print` statement | Fixed |
+| [29](#29-mode-rs-recording-wire-format-silently-coerced-non-string-dict-keys-and-collapsed-the-tuplelist-distinction) | Mode R's recording wire format silently coerced dict keys and collapsed tuple/list distinction | Fixed |
+| [28](#28-testcasefunction_name-had-no-safety-validation-at-all-spliced-directly-into-driver-script-source-code) | `TestCase.function_name` had no safety validation — spliced directly into driver-script source | Fixed |
+| [27](#27-import-pipes-produced-zero-findings-removed-in-python-313-with-no-fixer-anywhere-crashing-the-whole-modules-import) | `import pipes` produced zero findings — removed in Python 3.13, crashed the whole module | Fixed |
+| [26](#26-non-package-modules-never-checked-a-sibling-test-singular-directory-only-tests-plural) | Non-package modules never checked a sibling `test/` (singular) directory, only `tests/` | Fixed |
+| [25](#25-classes-defining-__cmp__-produced-zero-findings-python-3-silently-never-calls-it-more-dangerous-than-bare-cmp-calls) | Classes defining `__cmp__` produced zero findings — Python 3 silently never calls it | Fixed |
+| [24](#24-non-package-modules-never-checked-a-sibling-top-level-tests-directory-or-a-private-modules-underscore-stripped-test-file-name) | Non-package modules never checked a sibling top-level `tests/` dir or underscore-stripped test names | Fixed |
+| [23](#23-inspectgetargspec-produced-zero-findings-removed-in-python-311-with-no-fixer-anywhere-so-it-was-never-caught) | `inspect.getargspec(...)` produced zero findings — removed in Python 3.11, never caught | Fixed |
+| [22](#22-mode-as-dependency-closure-never-included-the-paired-test-files-own-local-imports-only-the-modules) | Mode A's dependency closure never included the paired test file's own local imports | Fixed |
+| [21](#21-dependency_closures-ancestor-__init__py-inclusion-bug-15-added-those-files-to-the-sandbox-but-never-traced-their-own-imports) | Ancestor `__init__.py` inclusion (bug #15) added files to the sandbox but never traced their own imports | Fixed |
+| [20](#20-mode-as-sandbox-never-wrapped-__init__py-in-a-package-directory-when-the-migration-root-itself-is-the-package-test-imports-failed-identically-on-both-interpreters) | Mode A's sandbox never wrapped `__init__.py` when the migration root itself is the package | Fixed |
+| [19](#19-bare-cmpa-b-builtin-calls-produced-zero-findings-removed-in-python-3-with-no-fixer-anywhere-so-it-was-never-caught) | Bare `cmp(a, b)` builtin calls produced zero findings — removed in Python 3, never caught | Fixed |
+| [18](#18-find_lib2to3_findings-had-no-exception-handling-around-its-own-parse-call-a-raw-lib2to3-parseerror-crashed-past-deterministic_transforms-already-correct-handling) | `find_lib2to3_findings` had no exception handling — a raw `ParseError` crashed past existing handling | Fixed |
+| [17](#17-_discover_test_pairs-doesnt-recognize-a-top-level-tests-directory-sibling-to-the-package-it-tests) | `_discover_test_pairs` didn't recognize a top-level `tests/` directory sibling to the package | Fixed |
+| [16](#16-mode-c-compared-raw-repr-strings-which-is-sensitive-to-dictset-ordering-differences-that-arent-real-behavior-differences) | Mode C compared raw `repr()` strings — sensitive to dict/set ordering differences that aren't real | Fixed |
+| [15](#15-a-leaf-modules-own-package-__init__py-wasnt-in-the-sandbox-when-nothing-in-the-module-itself-imports-it) | A leaf module's own package `__init__.py` wasn't in the sandbox when nothing imports it directly | Fixed |
+| [14](#14-a-lib2to3-unfixable-construct-surviving-into-the-transformed-output-produced-a-confusing-raw-traceback-message-instead-of-a-clean-diagnosis) | A `lib2to3`-unfixable construct surviving into the output produced a confusing raw traceback | Fixed |
+| [13](#13-__init__py-based-packages-cant-be-verified-when-the-test-suite-imports-them-by-package-name-from-purl-import-url) | `__init__.py`-based packages couldn't be verified when the test suite imports them by package name | Fixed |
+| [12](#12-both-interpreters-failing-test-collection-in-the-exact-same-way-was-scored-as-a-pass) | Both interpreters failing test *collection* identically was scored as a PASS | Fixed |
+| [11](#11-test-files-themselves-are-py2-source-too-but-mode-a-never-migrates-them-__metaclass__-silently-no-ops-on-python-3) | Test files are py2 source too, but Mode A never migrated them — `__metaclass__` silently no-ops on py3 | Fixed |
+| [10](#10-a-test-file-with-a-name-that-doesnt-fit-test_namepy-gets-characterization-tested-as-if-it-were-library-code) | A test file with an unrecognized name got characterization-tested as if it were library code | Fixed |
+| [9](#9-_discover_test_pairs-only-recognized-test_namepy-missing-the-equally-common-single-testspytestpy-convention) | `_discover_test_pairs` only recognized `test_<name>.py`, missing the `tests.py`/`test.py` convention | Fixed |
+| [8](#8-unicodedatanormalizeencode-silently-becomes-bytes-in-python-3-breaking-every-later-string-operation) | `unicodedata.normalize(...).encode(...)` silently becomes `bytes` in Python 3 | Fixed |
+| [7](#7-from-types-import-x-bare-legacy-type-name-has-no-python-3-equivalent-and-produces-zero-findings-so-its-never-fixed) | `from types import X` (legacy type name) has no py3 equivalent and produced zero findings | Fixed |
+| [6](#6-files-with-zero-needs_llm-findings-get-zero-repair-attempts-even-on-a-real-verification-failure) | Files with zero `needs_llm` findings got zero repair attempts, even on a real fixable failure | Fixed — see #35 |
+| [5](#5-sandbox-images-have-no-dependencies-installed-blocks-most-real-code) | Sandbox images had no dependencies installed — blocked most real code | Fixed |
+| [4](#4-diagnostic-clarity-mode-a-cant-distinguish-outcomes-differ-from-one-side-never-produced-parseable-output-at-all) | Mode A couldn't distinguish "outcomes differ" from "one side never produced parseable output" | Subsumed by #5 |
+| [3](#3-transient-networkapi-errors-crash-the-entire-run-not-just-one-file) | Transient network/API errors crashed the entire run, not just one file | Fixed |
+| [2](#2-mode-a-vacuous-pass-on-zero-discovered-tests) | Mode A vacuous pass on zero discovered tests | Fixed |
+| [1](#1-lib2to3s-fix_long-corrupts-identifiers-that-shadow-the-long-builtin) | `lib2to3`'s `fix_long` corrupts identifiers that shadow the `long` builtin | Fixed |
+
+Format below: newest first, full write-up per entry.
 
 ---
 
@@ -689,3 +731,16 @@ change and/or which agent/gate now catches this class of bug going forward,
 not just this one instance), status. Prefer "which agent generalizes this"
 over "which line got patched" where possible — the goal is a pipeline that
 gets more trustworthy over time, not a growing list of one-off patches.
+
+**Both parts are required, every time:**
+
+1. **Index table row** (top of this file) — one-line bug description plus
+   status, newest first. This is how anyone finds a specific entry without
+   reading the whole file; a bug added without a row defeats the reason the
+   index exists.
+2. **Full entry** (`## N. Title`) — same as always: found via, root cause,
+   fix, status.
+
+If a bug's status ever changes after the fact (e.g. found-but-not-fixed
+becomes fixed later, or one bug turns out to be subsumed by another), update
+both the index row and the entry itself — don't let them drift apart.

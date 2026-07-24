@@ -109,29 +109,15 @@ ingest → analyze → deterministic transform → Planner → Refactorer ⇄ Au
 
 ## Outcome categories
 
-Every file lands on exactly one status, and the report is explicit about
-which:
+Every file lands on exactly one status, ranked strongest to weakest, and the
+report is explicit about which:
 
-- **`VERIFIED`** — a real, human-authored test suite (or `__main__` golden
-  output) was run against both the original and migrated code, and agreed.
-  The strongest tier.
-- **`VERIFIED_RECORDED`** — matched real captured usage data (Mode R): real
-  `(args → result)` pairs from the original Python 2 code actually running,
-  recorded by the user in their own environment and replayed against the
-  migrated candidate. Stronger evidence than a guessed/fuzzed input, but
-  still not a human explicitly asserting the recorded output was itself
-  correct — kept as its own distinct tier for exactly that reason.
-- **`VERIFIED_INFERRED`** — no human-authored test suite existed; ShiftCode
-  auto-generated characterization tests and ran them against both
-  interpreters instead. Real signal — the expected behavior always comes
-  from actually executing the original code, never an LLM's guess — but
-  deliberately kept as a *distinct*, weaker-confidence status so the report
-  never implies a stronger guarantee than what actually happened.
-- **`NEEDS_REVIEW`** — a gate failed, or nothing could verify the file at
-  all (no test suite, no entry point, no characterization evidence). Always
-  comes with a real reason attached — a failed comparison, an exhausted
-  repair budget with the full attempt history, or an honest "couldn't verify
-  this way" — never silently skipped.
+| Status | Evidence | Confidence |
+|---|---|---|
+| `VERIFIED` | A real, human-authored test suite (or `__main__` golden output) run against both the original and migrated code, and it agreed | Strongest — a human wrote and trusted this test |
+| `VERIFIED_RECORDED` | Real `(args → result)` pairs recorded from the original Python 2 code actually running (Mode R), replayed against the candidate | Stronger than a guessed input, but no human ever asserted the recorded output was itself correct |
+| `VERIFIED_INFERRED` | No human-authored test suite existed — ShiftCode auto-generated characterization tests and ran them against both interpreters | Real signal (expected behavior always comes from executing the original code, never an LLM's guess), but weaker — kept distinct so the report never overclaims |
+| `NEEDS_REVIEW` | A gate failed, or nothing could verify the file at all (no test suite, no entry point, no characterization evidence) | Always comes with a real reason attached — a failed comparison, an exhausted repair budget with full attempt history, or an honest "couldn't verify this way" — never silently skipped |
 
 **Confidence is never blended** into one number across these tiers — that's
 deliberate. What *does* get reported within a tier is real evidence volume:
@@ -208,31 +194,43 @@ find/run/diagnose/design/confirm process every run follows:
 
 ## Known limitations
 
+Three different kinds of limitation, deliberately kept distinct — a
+permanent scope choice, a confirmed hard ceiling, and an open design
+question all warrant a different level of concern.
+
+**Scope, by design — not planned to change without a separate decision:**
+
 - Python 2 → Python 3 only; no other language pair implemented.
 - Migration itself is still one file at a time — each file gets its own
   plan and its own repair loop, no coordinated cross-file edit.
   Verification, however, is multi-file-aware (real dependency closures,
   see `docs/architecture.md`).
 - No multi-repo/batch orchestration yet.
-- Mode B's stderr comparison filters known Python interpreter warning noise
-  (`docs/bug-log.md` #34) but still requires exact equality on everything
-  else — a program's own real stderr output gets no special tolerance beyond
-  that. Fine for the case that's actually been hit so far; a genuinely
-  unresolved design question for anything broader.
-- Confirmed, not just suspected: some real repair failures are reproducibly
-  beyond the configured model's capability, not budget-limited — raising
-  `max_repair_attempts` from 3 to 8 changed nothing on 3 independent real
-  cases (identical failure every attempt in one case; the Auditor cycling
-  through contradictory theories without ever converging in the other two).
-  See `docs/stress-test-log.md` entry 16 for the full investigation,
-  including why a mechanical fallback for the simpler of the two failure
-  shapes turned out not to be safely buildable either.
 - `--checkpoint-dir` resumability only skips a file that fully finished
   (reached VERIFIED/VERIFIED_INFERRED/VERIFIED_RECORDED/NEEDS_REVIEW) in a
   previous run — a file killed partway through its own Phase A or Phase B
   has no checkpoint entry yet and gets fully redone, not resumed mid-file.
-  A deliberate scope limit, not an oversight: still a real improvement over
-  "restart everything," not a claim of finer-grained recovery than that.
+  Still a real improvement over "restart everything," not a claim of
+  finer-grained recovery than that.
+
+**Confirmed model-capability ceiling, not budget-limited:**
+
+- Some real repair failures are reproducibly beyond the configured model's
+  capability — raising `max_repair_attempts` from 3 to 8 changed nothing on
+  3 independent real cases (identical failure every attempt in one case;
+  the Auditor cycling through contradictory theories without ever
+  converging in the other two). See `docs/stress-test-log.md` entry 16 for
+  the full investigation, including why a mechanical fallback for the
+  simpler of the two failure shapes turned out not to be safely buildable
+  either.
+
+**Open design question, not yet resolved either way:**
+
+- Mode B's stderr comparison filters known Python interpreter warning noise
+  (`docs/bug-log.md` #34) but still requires exact equality on everything
+  else — a program's own real stderr output gets no special tolerance
+  beyond that. Fine for the case that's actually been hit so far; how
+  strict this *should* be for anything broader is still an open question.
 
 Implementation-level limitations (heuristic import-matching specifics,
 symbol-splice fallback behavior, etc.) are in `docs/architecture.md`.
