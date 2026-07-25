@@ -80,7 +80,8 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
 ## How it works
 
 ShiftCode operates through an automated, multi-stage pipeline designed to migrate Python 2 codebases to Python 3 with verified functional equivalence.
-```flowchart TD
+```mermaid
+flowchart TD
     %% Input Stage
     A[Python 2 Source Code] --> B[1. Ingest & Dependency Analysis]
     
