@@ -82,47 +82,46 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
 ShiftCode operates through an automated, multi-stage pipeline designed to migrate Python 2 codebases to Python 3 with verified functional equivalence.
 ```mermaid
 flowchart TD
-    %% Input Stage
+    %% Step 1: Ingest
     A[Python 2 Source Code] --> B[1. Ingest & Dependency Analysis]
     
-    %% Analysis & Recording
+    %% Step 2: Characterization
     B --> C[2. Characterization & Recording]
     C -->|Run Py2 Runtime / Tests| D[(Recorded Inputs & Outputs)]
     
-    %% Transformation Pipeline
+    %% Step 3: Transformation
     D --> E[3. AST Transformation]
-    E --> F[Deterministic Fixers]
-    E --> G[LLM Refactorer Agent]
+    E --> E1[Deterministic Fixers]
+    E --> E2[LLM Refactorer Agent]
     
-    %% Verification Loop
-    F --> H[4. Verification Gates]
-    G --> H
+    %% Step 4: Verification Container
+    E1 --> V1
+    E2 --> V1
     
-    subgraph Verification ["4. Multi-Gate Verification"]
-        H1[Syntax Gate] --> H2[Recording / Behavior Gate]
-        H2 --> H3[Characterization Gate / Fuzzing]
+    subgraph V ["4. Multi-Gate Verification"]
+        V1[Syntax Gate] --> V2[Recording / Behavior Gate]
+        V2 --> V3[Characterization Gate / Fuzzing]
     end
     
-    H --> Verification
+    %% Step 5 & 6: Decision Branch
+    V3 --> Gate{Passes All Gates?}
     
-    %% Pipeline Decision Branch
-    Verification -->|Passes All Gates| I[5. Final Migrated Python 3 Code]
-    Verification -->|Fails Gate| J[6. Self-Improving Repair Loop]
+    Gate -->|Yes| Output[5. Final Migrated Python 3 Code]
+    Gate -->|No| Loop[6. Self-Improving Repair Loop]
     
-    %% Repair Loop Logic
-    J --> K[Planner & Fixer Agents]
-    K -->|Generate Fix / Rule| E
-
-
+    %% Feedback Loop
+    Loop --> Repair[Planner & Fixer Agents]
+    Repair -->|Generate Fix / Rule| E
 ```
 1. Ingestion & Dependency Graph Analysis: ShiftCode ingests the target Python 2 project, parses external dependencies, and maps module call sites.
 2. Characterization & Behavior Recording: Runs the original code under a Python 2 sandbox runtime to record execution behavior, capture deterministic outputs, and generate dynamic characterization tests/fuzzing payloads.
 3. AST & Agent Transformation: Applies standard deterministic transformations via custom AST fixers alongside LLM-powered refactorer agents for complex code patterns.
 4. Multi-Gate Verification:
-  - Syntax Gate: Ensures the modified code is valid Python 3.
-  - Behavior Gate: Replays captured execution recordings against the transformed code inside isolated Python 3 sandbox containers.
-  - Characterization Gate: Executes tests and generated fuzz payloads to ensure zero regression in edge cases.
-5.Self-Improving Repair Loop: If any verification gate fails, failure logs and execution context are dispatched to the Planner and Fixer Agents to refine AST rules or refactoring strategies, looping back until verification succeeds.
+    - Syntax Gate: Ensures the modified code is valid Python 3.
+    - Behavior Gate: Replays captured execution recordings against the transformed code inside isolated Python 3 sandbox containers.
+    - Characterization Gate: Executes tests and generated fuzz payloads to ensure zero regression in edge cases.
+
+5. Self-Improving Repair Loop: If any verification gate fails, failure logs and execution context are dispatched to the Planner and Fixer Agents to refine AST rules or refactoring strategies, looping back until verification succeeds.
 
 ## Outcome categories
 
