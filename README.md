@@ -79,33 +79,49 @@ OpenAI-compatible endpoint) and a real Python 2 runtime (Docker):
 
 ## How it works
 
-```
-ingest → analyze → deterministic transform → Planner → Refactorer ⇄ Auditor → verify → report
-```
+ShiftCode operates through an automated, multi-stage pipeline designed to migrate Python 2 codebases to Python 3 with verified functional equivalence.
+```flowchart TD
+    %% Input Stage
+    A[Python 2 Source Code] --> B[1. Ingest & Dependency Analysis]
+    
+    %% Analysis & Recording
+    B --> C[2. Characterization & Recording]
+    C -->|Run Py2 Runtime / Tests| D[(Recorded Inputs & Outputs)]
+    
+    %% Transformation Pipeline
+    D --> E[3. AST Transformation]
+    E --> F[Deterministic Fixers]
+    E --> G[LLM Refactorer Agent]
+    
+    %% Verification Loop
+    F --> H[4. Verification Gates]
+    G --> H
+    
+    subgraph Verification ["4. Multi-Gate Verification"]
+        H1[Syntax Gate] --> H2[Recording / Behavior Gate]
+        H2 --> H3[Characterization Gate / Fuzzing]
+    end
+    
+    H --> Verification
+    
+    %% Pipeline Decision Branch
+    Verification -->|Passes All Gates| I[5. Final Migrated Python 3 Code]
+    Verification -->|Fails Gate| J[6. Self-Improving Repair Loop]
+    
+    %% Repair Loop Logic
+    J --> K[Planner & Fixer Agents]
+    K -->|Generate Fix / Rule| E
 
-1. **Ingest** — walks the target path, collects `.py` files.
-2. **Analyze** — a dry-run match against every vendored `lib2to3` fixer
-   (mechanically-fixable constructs: print statements, `xrange`,
-   `dict.iteritems()`, etc.), plus an `ast`-based scan for real behavior
-   differences no fixer covers (ambiguous division, legacy `types` imports,
-   `cmp()`/`__cmp__` removal, and more — see `docs/bug-log.md`).
-3. **Deterministic transform** — applies the mechanical fixers for real,
-   zero LLM involvement. Handles the bulk of every real migration reliably;
-   the LLM is reserved for whatever's left.
-4. **Planner → Refactorer ⇄ Auditor** — the Planner decides what should
-   change and why (writes no code); the Refactorer writes the actual patch;
-   if verification fails, the Auditor diagnoses the specific failure and
-   hands the Refactorer a targeted hint for a bounded number of retries
-   (default 3). Exhausting retries lands on `NEEDS_REVIEW` with the full
-   attempt history attached, not a silent guess. Full agent-by-agent detail
-   (what each one does, where, and why): `docs/agents.md`.
-5. **Verify** — a syntax gate, a behavior gate, and a determinism gate, all
-   against real execution inside sandboxed Docker containers. See *Outcome
-   categories* below for what you get back, and `docs/verification.md` for
-   the full mechanics.
-6. **Report** — JSON + text/console output: per-file status, every finding,
-   the full plan, every repair attempt with its diagnosis, and exactly what
-   evidence backs the verdict.
+
+```
+1. Ingestion & Dependency Graph Analysis: ShiftCode ingests the target Python 2 project, parses external dependencies, and maps module call sites.
+2. Characterization & Behavior Recording: Runs the original code under a Python 2 sandbox runtime to record execution behavior, capture deterministic outputs, and generate dynamic characterization tests/fuzzing payloads.
+3. AST & Agent Transformation: Applies standard deterministic transformations via custom AST fixers alongside LLM-powered refactorer agents for complex code patterns.
+4. Multi-Gate Verification:
+  - Syntax Gate: Ensures the modified code is valid Python 3.
+  - Behavior Gate: Replays captured execution recordings against the transformed code inside isolated Python 3 sandbox containers.
+  - Characterization Gate: Executes tests and generated fuzz payloads to ensure zero regression in edge cases.
+5.Self-Improving Repair Loop: If any verification gate fails, failure logs and execution context are dispatched to the Planner and Fixer Agents to refine AST rules or refactoring strategies, looping back until verification succeeds.
 
 ## Outcome categories
 
